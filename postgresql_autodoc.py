@@ -1,7 +1,8 @@
 # command line arguments to run in sandbox:
-#   postgresql_autodoc.py -d sandbox -u postgres --password 1 -t html
+#   -d sandbox -u postgres --password 1 -t html
 import argparse
 import os
+import psycopg2
 import sys
 
 
@@ -15,8 +16,8 @@ def main():
     # Setup the default connection variables based on the environment
     dbuser = os.getenv('PGUSER') or os.getenv('USER')
     database = os.getenv('PGDATABASE') or os.getenv('USER')
-    dbhost = os.getenv('PGHOST') or ''
-    dbport = os.getenv('PGPORT') or ''
+    dbhost = os.getenv('PGHOST')
+    dbport = os.getenv('PGPORT')
 
     # Determine whether we need a password to connect
     needpass = 0
@@ -108,11 +109,11 @@ def main():
         dbpass = args.password
 
     # Make sure we get a password before attempting to conenct
-    if args.prompt_password is not None:
+    if args.prompt_password:
         needpass = 1
 
     # Read from .pgpass (override all other password options)
-    if args.w is not None:
+    if args.w:
         dbpass = None
         dbuser = None
         needpass = 0
@@ -149,7 +150,7 @@ def main():
         table_out = ','.join(["'{}'".format(table) for table in tables_in])
 
     # Check to see if Statistics have been requested
-    if args.statistics is not None:
+    if args.statistics:
         statistics = 1
 
     # If no arguments have been provided, connect to the database anyway but
@@ -163,6 +164,12 @@ def main():
     # for a password.
     if needpass and dbpass is None:
         dbpass = input("Password: ")
+
+    # Database Connection
+    dbhost = dbhost if dbhost is not None else 'localhost'
+    dbport = dbport if dbport is not None else 5432
+    con = psycopg2.connect(database=database, user=dbuser, password=dbpass, host=dbhost, port=dbport)
+    cur = con.cursor()
 
 
 if __name__ == '__main__':
