@@ -5,6 +5,7 @@ from decimal import Decimal
 import json
 import os
 import psycopg2
+import re
 import sys
 
 
@@ -26,6 +27,7 @@ def set_table_attribute(struct, schema, table, name, value):
         setdefault('TABLE', dict()). \
         setdefault(table, dict())[name] = value
 
+
 def set_column_attribute(struct, schema, table, column, name, value):
     struct. \
         setdefault(schema, dict()). \
@@ -33,6 +35,25 @@ def set_column_attribute(struct, schema, table, column, name, value):
         setdefault(table, dict()). \
         setdefault('COLUMN', dict()). \
         setdefault(column, dict())[name] = value
+
+
+def set_column_constraint_attribute(struct, schema, table, column, constraint, name, value):
+    struct. \
+        setdefault(schema, dict()). \
+        setdefault('TABLE', dict()). \
+        setdefault(table, dict()). \
+        setdefault('COLUMN', dict()). \
+        setdefault(column, dict()). \
+        setdefault('CON', dict()). \
+        setdefault(constraint, dict())[name] = value
+
+
+def set_index_definition(struct, schema, table, index_name, index_definition):
+    struct. \
+        setdefault(schema, dict()). \
+        setdefault('TABLE', dict()). \
+        setdefault(table, dict()). \
+        setdefault('INDEX', dict())[index_name] = index_definition
 
 
 def set_permission_granted(struct, schema, table, user, permission):
@@ -385,8 +406,8 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
                        ) AS indexdef
          FROM pg_catalog.pg_indexes
         WHERE substring(indexdef FROM 8 FOR 6) != 'UNIQUE'
-          AND schemaname = :schemaname
-          AND tablename = :tablename;
+          AND schemaname = %(schemaname)s
+          AND tablename = %(tablename)s;
     '''
 
     sql_inheritance = '''
@@ -419,7 +440,7 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
          JOIN pg_catalog.pg_depend AS d ON (d.refobjid = c.oid)
         WHERE contype IN ('p', 'u')
           AND deptype = 'i'
-          AND conrelid = :conrelid;
+          AND conrelid = %(conrelid)s;
     '''
 
     # FOREIGN KEY fetch
@@ -442,7 +463,7 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
          JOIN pg_catalog.pg_namespace ON (pg_class.relnamespace = pg_namespace.oid)
          JOIN pg_catalog.pg_namespace AS pn ON (pn.oid = pc.relnamespace)
         WHERE contype = 'f'
-          AND conrelid = :conrelid
+          AND conrelid = %(conrelid)s
           AND pg_namespace.nspname ~ '{}'
           AND pn.nspname ~ '{}';
     '''.format(schemapattern, schemapattern)
@@ -454,8 +475,8 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
          FROM pg_catalog.pg_attribute
          JOIN pg_catalog.pg_class ON (pg_class.oid = attrelid)
          JOIN pg_catalog.pg_namespace ON (relnamespace = pg_namespace.oid)
-        WHERE attrelid = :attrelid
-          AND attnum = :attnum;
+        WHERE attrelid = %(attrelid)s
+          AND attnum = %(attnum)s;
     '''
 
     # Fetch CHECK constraints
@@ -543,7 +564,7 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
         # Foreach acl
         for acl_item in acl.split(','):
             if not acl_item:
-                break
+                continue
             user, raw_permissions = acl_item.split('=')
             if raw_permissions:
                 user = 'PUBLIC' if not user else user
@@ -596,7 +617,137 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
             set_column_attribute(struct, schema, relname, column_name, 'DESCRIPTION', column['column_description'])
             set_column_attribute(struct, schema, relname, column_name, 'DEFAULT', column['column_default'])
 
-    pass
+        # Pull out both PRIMARY and UNIQUE keys based on the supplied query
+        # and the relation OID.
+        #
+        # Since there may be multiple UNIQUE indexes on a table, we append a
+        # number to the end of the the UNIQUE keyword which shows that they
+        # are a part of a related definition.  I.e UNIQUE_1 goes with UNIQUE_1
+        #
+        cur.execute(sql_primary_keys, {'conrelid': reloid, })
+        primary_keys = fetchall_as_list_of_dict(cur)
+        unqgroup = 0
+        for pricols in primary_keys:
+            index_type = pricols['constraint_type']
+            con = pricols['constraint_name']
+            indexdef = pricols['constraint_definition']
+
+            # Fetch the column list
+            column_list = indexdef
+            column_list = re.sub(".*\\(([^)]+)\\).*", "\\1", column_list)
+
+            # Split our column list and deal with all PRIMARY KEY fields
+            collist = column_list.split(',')
+
+            # Store the column number in the indextype field.  Anything > 0
+            # indicates the column has this type of constraint applied to it.
+            numcols = len(collist)
+
+            # Bump group number if there are two or more columns
+            if numcols >= 2 and index_type == 'UNIQUE':
+                unqgroup = unqgroup + 1
+
+            # Record the data to the structure.
+            for column_index, column in enumerate(collist):
+                column = column.strip().strip('"')
+                set_column_constraint_attribute(struct, schema, relname, column, con, 'TYPE', index_type)
+                set_column_constraint_attribute(struct, schema, relname, column, con, 'COLNUM', column_index + 1)
+
+                # Record group number only when a multi-column
+                # constraint is involved
+                if numcols >= 2 and index_type == 'UNIQUE':
+                    set_column_constraint_attribute(struct, schema, relname, column, con, 'KEYGROUP', unqgroup)
+
+        # FOREIGN KEYS like UNIQUE indexes can appear several times in
+        # a table in multi-column format. We use the same trick to
+        # record a numeric association to the foreign key reference.
+        cur.execute(sql_foreign_keys, {'conrelid': reloid, })
+        foreign_keys = fetchall_as_list_of_dict(cur)
+        fkgroup = 0
+        for forcols in foreign_keys:
+            column_oid = forcols['oid']
+            con = forcols['constraint_name']
+
+            # Declare variables for dataload
+            keylist = list()
+            fkeylist = list()
+            fschema = None
+            ftable = None
+
+            fkey = forcols['constraint_fkey']
+            keys = forcols['constraint_key']
+            frelid = forcols['foreignrelid']
+
+            # Since decent array support was not added until 7.4, and
+            # we want to support 7.3 as well, we parse the text version
+            # of the array by hand rather than combining this and
+            # Foreign_Key_Arg query into a single query.
+
+            fkeyset = list()
+            if isinstance(fkey, list):
+                fkeyset = fkey
+            else:  # DEPRECATED: DBD::Pg 1.49 and earlier
+                fkeyset = fkey.strip('{}').replace('"', '').split(',')
+
+            keyset = list()
+            if isinstance(keys, list):
+                keyset = keys
+            else:  # DEPRECATED: DBD::Pg 1.49 and earlier
+                keyset = keys.strip('{}').replace('"', '').split(',')
+
+            # Convert the list of column numbers into column names for the
+            # local side.
+            for k in keyset:
+                cur.execute(sql_foreign_key_arg, {'attrelid': reloid, 'attnum': k})
+                foreign_key_arg = fetchall_as_list_of_dict(cur)
+                assert len(foreign_key_arg) == 1
+                keylist.append(foreign_key_arg[0]['attribute_name'])
+
+            # Convert the list of columns numbers into column names
+            # for the referenced side. Grab the table and namespace
+            # while we're here.
+            for k in fkeyset:
+                cur.execute(sql_foreign_key_arg, {'attrelid': frelid, 'attnum': k})
+                foreign_key_arg = fetchall_as_list_of_dict(cur)
+                assert len(foreign_key_arg) == 1
+                fkeylist.append(foreign_key_arg[0]['attribute_name'])
+                fschema = foreign_key_arg[0]['namespace']
+                ftable = foreign_key_arg[0]['relation_name']
+
+            # Deal with common catalog issues.
+            if len(keylist) != len(fkeylist):
+                raise RuntimeError('FKEY {} Broken -- fix your PostgreSQL installation'.format(con))
+
+            # Load up the array based on the information discovered
+            # using the information retrieval methods above.
+            numcols = len(keylist)
+
+            # Bump group number if there are two or more columns involved
+            if numcols >= 2 :
+                fkgroup = fkgroup + 1
+
+            # Record the foreign key to structure
+            for column_index, column, fkey in zip(range(numcols), keylist, fkeylist):
+                set_column_constraint_attribute(struct, schema, relname, column, con, 'TYPE', 'FOREIGN KEY')
+                set_column_constraint_attribute(struct, schema, relname, column, con, 'COLNUM', column_index + 1)
+                set_column_constraint_attribute(struct, schema, relname, column, con, 'FKTABLE', ftable)
+                set_column_constraint_attribute(struct, schema, relname, column, con, 'FKSCHEMA', fschema)
+                set_column_constraint_attribute(struct, schema, relname, column, con, 'FK-COL NAME', fkey)
+
+                # Record group number only when a multi-column
+                # constraint is involved
+                if numcols >= 2:
+                    set_column_constraint_attribute(struct, schema, relname, column, con, 'KEYGROUP', fkgroup)
+
+        # Pull out index information
+        cur.execute(sql_indexes, {'schemaname': schema, 'tablename': relname})
+        indexes = fetchall_as_list_of_dict(cur)
+        for idx in indexes:
+            index_name = idx['indexname']
+            index_definition = idx['indexdef']
+            set_index_definition(struct, schema, relname, index_name, index_definition)
+
+        pass
 
 
 #####
@@ -611,7 +762,6 @@ def write_using_templates(db, database, statistics, template_path, output_filena
                           'template_path': template_path, 'output_filename_base': output_filename_base,
                           'wanted_output': wanted_output}, indent=2, cls=PgJsonEncoder)
     print(as_json)
-    # print(db, database, statistics, template_path, output_filename_base, wanted_output, sep='\n')
     pass
 
 
