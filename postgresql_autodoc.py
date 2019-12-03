@@ -1,9 +1,62 @@
 # command line arguments to run in sandbox:
 #   -d sandbox -u postgres --password 1 -t html
 import argparse
+from decimal import Decimal
+import json
 import os
 import psycopg2
 import sys
+
+
+def fetchall_as_list_of_dict(cur):
+    result = list()
+    rows = cur.fetchall()
+    description = cur.description
+    for row in rows:
+        row_as_dict = dict()
+        for index, col in enumerate(description):
+            row_as_dict[col.name] = row[index]
+        result.append(row_as_dict)
+    return result
+
+
+def set_table_attribute(struct, schema, table, name, value):
+    struct. \
+        setdefault(schema, dict()). \
+        setdefault('TABLE', dict()). \
+        setdefault(table, dict())[name] = value
+
+def set_column_attribute(struct, schema, table, column, name, value):
+    struct. \
+        setdefault(schema, dict()). \
+        setdefault('TABLE', dict()). \
+        setdefault(table, dict()). \
+        setdefault('COLUMN', dict()). \
+        setdefault(column, dict())[name] = value
+
+
+def set_permission_granted(struct, schema, table, user, permission):
+    struct. \
+        setdefault(schema, dict()). \
+        setdefault('TABLE', dict()). \
+        setdefault(table, dict()). \
+        setdefault('ACL', dict()). \
+        setdefault(user, dict())[permission] = 1
+
+
+def set_constraint(struct, schema, table, constraint_name, constraint_source):
+    struct. \
+        setdefault(schema, dict()). \
+        setdefault('TABLE', dict()). \
+        setdefault(table, dict()). \
+        setdefault('CONSTRAINT', dict())[constraint_name] = constraint_source
+
+
+class PgJsonEncoder(json.JSONEncoder):
+    def default(self, o):
+        if isinstance(o, Decimal):
+            return float(o)
+        return super(PgJsonEncoder, self).default(o)
 
 
 def main():
@@ -168,8 +221,398 @@ def main():
     # Database Connection
     dbhost = dbhost if dbhost is not None else 'localhost'
     dbport = dbport if dbport is not None else 5432
-    con = psycopg2.connect(database=database, user=dbuser, password=dbpass, host=dbhost, port=dbport)
-    cur = con.cursor()
+    conn = psycopg2.connect(database=database, user=dbuser, password=dbpass, host=dbhost, port=dbport)
+    conn.set_client_encoding('UTF8')
+
+    info_collect(conn, db, database, only_schema, only_matching, statistics, table_out)
+
+    # Write out *ALL* templates
+    write_using_templates(db, database, statistics, template_path, output_filename_base, wanted_output)
+
+
+##
+# info_collect
+#
+# Pull out all of the applicable information about a specific database
+def info_collect(conn, db, database, only_schema, only_matching, statistics, table_out):
+    struct = db['STRUCT'] = dict()
+
+    # PostgreSQL's version is used to determine what queries are required
+    # to retrieve a given information set.
+    if conn.server_version < 70300:
+        raise RuntimeError("PostgreSQL 7.3 and later are supported")
+
+    # Ensure we only retrieve information for the requested schemas.
+    #
+    # system_schema         -> The primary system schema for a database.
+    #                       Public is used for versions prior to 7.3
+    #
+    # system_schema_list -> The list of schemas which we are not supposed
+    #                       to gather information for.
+    #                        TODO: Merge with system_schema in array form.
+    #
+    # schemapattern      -> The schema the user provided as a command
+    #                       line option.
+    system_schema = 'pg_catalog'
+    system_schema_list = 'pg_catalog|pg_toast|pg_temp_[0-9]+|information_schema'
+    schemapattern = '^' if only_schema is None else '^' + only_schema + '$'
+
+    # and only objects matching the specified pattern, if any
+    matchpattern = '' if only_matching is None else only_matching
+
+    #
+    # List of queries which are used to gather information from the
+    # database. The queries differ based on version but should
+    # provide similar output. At some point it should be safe to remove
+    # support for older database versions.
+    #
+
+    # Fetch the description of the database
+    sql_database = '''
+       SELECT pg_catalog.shobj_description(oid, 'pg_database') as comment
+         FROM pg_catalog.pg_database
+        WHERE datname = '{}';
+    '''.format(database)
+
+    # Pull out a list of tables, views and special structures.
+    sql_tables = '''
+       SELECT nspname as namespace
+            , relname as tablename
+            , pg_catalog.pg_get_userbyid(relowner) AS tableowner
+            , pg_class.oid
+            , pg_catalog.obj_description(pg_class.oid, 'pg_class') as table_description
+            , relacl
+            , CASE
+              WHEN relkind = 'r' THEN
+                'table'
+              WHEN relkind = 's' THEN
+                'special'
+              ELSE
+                'view'
+              END as reltype
+            , CASE
+              WHEN relkind = 'v' THEN
+                pg_get_viewdef(pg_class.oid)
+              ELSE
+                NULL
+              END as view_definition
+         FROM pg_catalog.pg_class
+         JOIN pg_catalog.pg_namespace ON (relnamespace = pg_namespace.oid)
+        WHERE relkind IN ('r', 's', 'v')
+          AND relname ~ '{}'
+          AND nspname !~ '{}'
+          AND nspname ~ '{}' 
+    '''.format(matchpattern, system_schema_list, schemapattern)
+
+    # - uses pg_class.oid
+    sql_columns = '''
+       SELECT attname as column_name
+            , attlen as column_length
+            , CASE
+              WHEN pg_type.typname = 'int4'
+                   AND EXISTS (SELECT TRUE
+                                 FROM pg_catalog.pg_depend
+                                 JOIN pg_catalog.pg_class ON (pg_class.oid = objid)
+                                WHERE refobjsubid = attnum
+                                  AND refobjid = attrelid
+                                  AND relkind = 'S') THEN
+                'serial'
+              WHEN pg_type.typname = 'int8'
+                   AND EXISTS (SELECT TRUE
+                                 FROM pg_catalog.pg_depend
+                                 JOIN pg_catalog.pg_class ON (pg_class.oid = objid)
+                                WHERE refobjsubid = attnum
+                                  AND refobjid = attrelid
+                                  AND relkind = 'S') THEN
+                'bigserial'
+              ELSE
+                pg_catalog.format_type(atttypid, atttypmod)
+              END as column_type
+            , CASE
+              WHEN attnotnull THEN
+                cast('NOT NULL' as text)
+              ELSE
+                cast('' as text)
+              END as column_null
+            , CASE
+              WHEN pg_type.typname IN ('int4', 'int8')
+                   AND EXISTS (SELECT TRUE
+                                 FROM pg_catalog.pg_depend
+                                 JOIN pg_catalog.pg_class ON (pg_class.oid = objid)
+                                WHERE refobjsubid = attnum
+                                  AND refobjid = attrelid
+                                  AND relkind = 'S') THEN
+                NULL
+              ELSE
+                pg_get_expr(adbin, adrelid)
+              END as column_default
+            , pg_catalog.col_description(attrelid, attnum) as column_description
+            , attnum
+         FROM pg_catalog.pg_attribute 
+         JOIN pg_catalog.pg_type ON (pg_type.oid = atttypid) 
+    LEFT JOIN pg_catalog.pg_attrdef ON (   attrelid = adrelid 
+                                       AND attnum = adnum)
+        WHERE attnum > 0
+          AND attisdropped IS FALSE
+          AND attrelid = %(attrelid)s;
+    '''
+
+    sql_table_statistics = None
+    if statistics == 1:
+        if conn.server_version < 70400:
+            raise RuntimeError("Table statistics supported on PostgreSQL 7.4 and later.\n"
+                               "Remove --statistics flag and try again.")
+        sql_table_statistics = '''
+           SELECT table_len
+                , tuple_count
+                , tuple_len
+                , CAST(tuple_percent AS numeric(20,2)) AS tuple_percent
+                , dead_tuple_count
+                , dead_tuple_len
+                , CAST(dead_tuple_percent AS numeric(20,2)) AS dead_tuple_percent
+                , CAST(free_space AS numeric(20,2)) AS free_space
+                , CAST(free_percent AS numeric(20,2)) AS free_percent
+             FROM pgstattuple(CAST(%(table_oid)s AS oid));
+        '''
+
+    sql_indexes = '''
+       SELECT schemaname
+            , tablename
+            , indexname
+            , substring(    indexdef
+                       FROM position('(' IN indexdef) + 1
+                        FOR length(indexdef) - position('(' IN indexdef) - 1
+                       ) AS indexdef
+         FROM pg_catalog.pg_indexes
+        WHERE substring(indexdef FROM 8 FOR 6) != 'UNIQUE'
+          AND schemaname = :schemaname
+          AND tablename = :tablename;
+    '''
+
+    sql_inheritance = '''
+           SELECT parnsp.nspname AS par_schemaname
+            , parcla.relname AS par_tablename
+            , chlnsp.nspname AS chl_schemaname
+            , chlcla.relname AS chl_tablename
+         FROM pg_catalog.pg_inherits
+         JOIN pg_catalog.pg_class AS chlcla ON (chlcla.oid = inhrelid)
+         JOIN pg_catalog.pg_namespace AS chlnsp ON (chlnsp.oid = chlcla.relnamespace)
+         JOIN pg_catalog.pg_class AS parcla ON (parcla.oid = inhparent)
+         JOIN pg_catalog.pg_namespace AS parnsp ON (parnsp.oid = parcla.relnamespace)
+        WHERE chlnsp.nspname = :child_schemaname
+          AND chlcla.relname = :child_tablename
+          AND chlnsp.nspname ~ '{}'
+          AND parnsp.nspname ~ '{}';
+    '''.format(schemapattern, schemapattern)
+
+    # Fetch the list of PRIMARY and UNIQUE keys
+    sql_primary_keys = '''
+       SELECT conname AS constraint_name
+            , pg_catalog.pg_get_indexdef(d.objid) AS constraint_definition
+            , CASE
+              WHEN contype = 'p' THEN
+                'PRIMARY KEY'
+              ELSE
+                'UNIQUE'
+              END as constraint_type
+         FROM pg_catalog.pg_constraint AS c
+         JOIN pg_catalog.pg_depend AS d ON (d.refobjid = c.oid)
+        WHERE contype IN ('p', 'u')
+          AND deptype = 'i'
+          AND conrelid = :conrelid;
+    '''
+
+    # FOREIGN KEY fetch
+    #
+    # Don't return the constraint name if it was automatically generated by
+    # PostgreSQL.  The $N (where N is an integer) is not a descriptive enough
+    # piece of information to be worth while including in the various outputs.
+    sql_foreign_keys = '''
+       SELECT pg_constraint.oid
+            , pg_namespace.nspname AS namespace
+            , CASE WHEN substring(pg_constraint.conname FROM 1 FOR 1) = '\$' THEN ''
+              ELSE pg_constraint.conname
+              END AS constraint_name
+            , conkey AS constraint_key
+            , confkey AS constraint_fkey
+            , confrelid AS foreignrelid
+         FROM pg_catalog.pg_constraint
+         JOIN pg_catalog.pg_class ON (pg_class.oid = conrelid)
+         JOIN pg_catalog.pg_class AS pc ON (pc.oid = confrelid)
+         JOIN pg_catalog.pg_namespace ON (pg_class.relnamespace = pg_namespace.oid)
+         JOIN pg_catalog.pg_namespace AS pn ON (pn.oid = pc.relnamespace)
+        WHERE contype = 'f'
+          AND conrelid = :conrelid
+          AND pg_namespace.nspname ~ '{}'
+          AND pn.nspname ~ '{}';
+    '''.format(schemapattern, schemapattern)
+
+    sql_foreign_key_arg = '''
+       SELECT attname AS attribute_name
+            , relname AS relation_name
+            , nspname AS namespace
+         FROM pg_catalog.pg_attribute
+         JOIN pg_catalog.pg_class ON (pg_class.oid = attrelid)
+         JOIN pg_catalog.pg_namespace ON (relnamespace = pg_namespace.oid)
+        WHERE attrelid = :attrelid
+          AND attnum = :attnum;
+    '''
+
+    # Fetch CHECK constraints
+    sql_constraint = '''
+       SELECT pg_get_constraintdef(oid) AS constraint_source
+            , conname AS constraint_name
+         FROM pg_constraint
+        WHERE conrelid = %(conrelid)s
+          AND contype = 'c';
+    '''
+
+    # Query for function information
+    sql_function = '''
+       SELECT proname AS function_name
+            , nspname AS namespace
+            , lanname AS language_name
+            , pg_catalog.obj_description(pg_proc.oid, 'pg_proc') AS comment
+            , proargtypes AS function_args
+            , proargnames AS function_arg_names
+            , prosrc AS source_code
+            , proretset AS returns_set
+            , prorettype AS return_type
+         FROM pg_catalog.pg_proc
+         JOIN pg_catalog.pg_language ON (pg_language.oid = prolang)
+         JOIN pg_catalog.pg_namespace ON (pronamespace = pg_namespace.oid)
+         JOIN pg_catalog.pg_type ON (prorettype = pg_type.oid)
+        WHERE pg_namespace.nspname !~ '{}'
+          AND pg_namespace.nspname ~ '{}'
+          AND proname ~ '{}'
+          AND proname != 'plpgsql_call_handler';
+    '''.format(system_schema_list, schemapattern, matchpattern)
+
+    sql_function_arg = '''
+       SELECT nspname AS namespace
+            , replace( pg_catalog.format_type(pg_type.oid, typtypmod)
+                     , nspname ||'.'
+                     , '') AS type_name
+         FROM pg_catalog.pg_type
+         JOIN pg_catalog.pg_namespace ON (pg_namespace.oid = typnamespace)
+        WHERE pg_type.oid = :type_oid;
+    '''
+
+    sql_schema = '''
+       SELECT pg_catalog.obj_description(oid, 'pg_namespace') AS comment
+            , nspname as namespace
+         FROM pg_catalog.pg_namespace
+        WHERE pg_namespace.nspname !~ '{}'
+          AND pg_namespace.nspname ~ '{}';
+    '''.format(system_schema_list, schemapattern)
+
+    cur = conn.cursor()
+
+    # Fetch Database info
+    cur.execute(sql_database)
+    rows = fetchall_as_list_of_dict(cur)
+    if rows:
+        db['COMMENT'] = rows[0]['comment']
+
+    # Fetch tables and all things bound to tables
+    permission_flag_to_str = {
+        'a': 'INSERT',
+        'r': 'SELECT',
+        'w': 'UPDATE',
+        'd': 'DELETE',
+        'R': 'RULE',
+        'x': 'REFERENCES',
+        't': 'TRIGGER',
+    }
+    cur.execute(sql_tables)
+    tables = fetchall_as_list_of_dict(cur)
+    for table in tables:
+        reloid = table['oid']
+        relname = table['tablename']
+        schema = table['namespace']
+
+        # Store permissions
+        acl = table['relacl']
+
+        # Empty acl groups cause serious issues.
+        acl = '' if acl is None else acl
+
+        # Strip array forming 'junk'.
+        acl = acl.strip('{}').replace('"', '')
+
+        # Foreach acl
+        for acl_item in acl.split(','):
+            if not acl_item:
+                break
+            user, raw_permissions = acl_item.split('=')
+            if raw_permissions:
+                user = 'PUBLIC' if not user else user
+
+            # The section after the / is the user who granted the permissions
+            permissions, granting_user = raw_permissions.split('/')
+
+            # Break down permissions to individual flags
+            for flag in permissions:
+                permission = permission_flag_to_str.setdefault(flag, 'FLAG_{}'.format(flag))  # fall back if unexpected
+                set_permission_granted(struct, schema, relname, user, permission)
+
+        # Primitive Stats, but only if requested
+        if statistics == 1 and table['reltype'] == 'table':
+            cur.execute(sql_table_statistics, {'table_oid': reloid, })
+            stats = fetchall_as_list_of_dict(cur)
+            assert len(stats) == 1
+            set_table_attribute(struct, schema, relname, 'TABLELEN', stats[0]['table_len'])
+            set_table_attribute(struct, schema, relname, 'TUPLECOUNT', stats[0]['tuple_count'])
+            set_table_attribute(struct, schema, relname, 'TUPLELEN', stats[0]['tuple_len'])
+            set_table_attribute(struct, schema, relname, 'DEADTUPLELEN', stats[0]['dead_tuple_len'])
+            set_table_attribute(struct, schema, relname, 'FREELEN', stats[0]['free_space'])
+
+        # Store the relation type
+        set_table_attribute(struct, schema, relname, 'TYPE', table['reltype'])
+
+        # Store table description
+        set_table_attribute(struct, schema, relname, 'DESCRIPTION', table['table_description'])
+
+        # Store the view definition
+        set_table_attribute(struct, schema, relname, 'VIEW_DEF', table['view_definition'])
+
+        # Store constraints
+        cur.execute(sql_constraint, {'conrelid': reloid, })
+        constraints = fetchall_as_list_of_dict(cur)
+        for constraint in constraints:
+            constraint_name = constraint['constraint_name']
+            constraint_source = constraint['constraint_source']
+            set_constraint(struct, schema, relname, constraint_name, constraint_source)
+
+        cur.execute(sql_columns, {'attrelid': reloid, })
+        columns = fetchall_as_list_of_dict(cur)
+        for column in columns:
+            column_name = column['column_name']
+            set_column_attribute(struct, schema, relname, column_name, 'ORDER', column['attnum'])
+            set_column_attribute(struct, schema, relname, column_name, 'PRIMARY KEY', 0)
+            set_column_attribute(struct, schema, relname, column_name, 'FKTABLE', '')
+            set_column_attribute(struct, schema, relname, column_name, 'TYPE', column['column_type'])
+            set_column_attribute(struct, schema, relname, column_name, 'NULL', column['column_null'])
+            set_column_attribute(struct, schema, relname, column_name, 'DESCRIPTION', column['column_description'])
+            set_column_attribute(struct, schema, relname, column_name, 'DEFAULT', column['column_default'])
+
+    pass
+
+
+#####
+# write_using_templates
+#
+# Generate structure that HTML::Template requires out of the
+# $struct for table related information, and $struct for
+# the schema and function information
+def write_using_templates(db, database, statistics, template_path, output_filename_base, wanted_output):
+    print('write_using_templates')
+    as_json = json.dumps({'db': db, 'database': database, 'statistics': statistics,
+                          'template_path': template_path, 'output_filename_base': output_filename_base,
+                          'wanted_output': wanted_output}, indent=2, cls=PgJsonEncoder)
+    print(as_json)
+    # print(db, database, statistics, template_path, output_filename_base, wanted_output, sep='\n')
+    pass
 
 
 if __name__ == '__main__':
