@@ -21,6 +21,12 @@ def fetchall_as_list_of_dict(cur):
     return result
 
 
+def set_schema_comment(struct, schema, comment):
+    struct. \
+        setdefault(schema, dict()). \
+        setdefault('SCHEMA', dict())['COMMENT'] = comment
+
+
 def set_table_attribute(struct, schema, table, name, value):
     struct. \
         setdefault(schema, dict()). \
@@ -71,6 +77,22 @@ def set_constraint(struct, schema, table, constraint_name, constraint_source):
         setdefault('TABLE', dict()). \
         setdefault(table, dict()). \
         setdefault('CONSTRAINT', dict())[constraint_name] = constraint_source
+
+
+def set_table_inherit(struct, schema, table, parent_schemaname, parent_tablename):
+    struct. \
+        setdefault(schema, dict()). \
+        setdefault('TABLE', dict()). \
+        setdefault(table, dict()). \
+        setdefault('INHERIT', dict()). \
+        setdefault(parent_schemaname, dict())[parent_tablename] = 1
+
+
+def set_function_attribute(struct, schema, function, name, value):
+    struct. \
+        setdefault(schema, dict()). \
+        setdefault('FUNCTION', dict()). \
+        setdefault(function, dict())[name] = value
 
 
 class PgJsonEncoder(json.JSONEncoder):
@@ -246,6 +268,7 @@ def main():
     conn.set_client_encoding('UTF8')
 
     info_collect(conn, db, database, only_schema, only_matching, statistics, table_out)
+    conn.close()
 
     # Write out *ALL* templates
     write_using_templates(db, database, statistics, template_path, output_filename_base, wanted_output)
@@ -324,6 +347,8 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
           AND nspname !~ '{}'
           AND nspname ~ '{}' 
     '''.format(matchpattern, system_schema_list, schemapattern)
+    if table_out is not None:
+        sql_tables = sql_tables + 'AND relname IN {}'.format(table_out)
 
     # - uses pg_class.oid
     sql_columns = '''
@@ -420,8 +445,8 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
          JOIN pg_catalog.pg_namespace AS chlnsp ON (chlnsp.oid = chlcla.relnamespace)
          JOIN pg_catalog.pg_class AS parcla ON (parcla.oid = inhparent)
          JOIN pg_catalog.pg_namespace AS parnsp ON (parnsp.oid = parcla.relnamespace)
-        WHERE chlnsp.nspname = :child_schemaname
-          AND chlcla.relname = :child_tablename
+        WHERE chlnsp.nspname = %(child_schemaname)s
+          AND chlcla.relname = %(child_tablename)s
           AND chlnsp.nspname ~ '{}'
           AND parnsp.nspname ~ '{}';
     '''.format(schemapattern, schemapattern)
@@ -489,7 +514,7 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
     '''
 
     # Query for function information
-    sql_function = '''
+    sql_functions = '''
        SELECT proname AS function_name
             , nspname AS namespace
             , lanname AS language_name
@@ -516,10 +541,10 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
                      , '') AS type_name
          FROM pg_catalog.pg_type
          JOIN pg_catalog.pg_namespace ON (pg_namespace.oid = typnamespace)
-        WHERE pg_type.oid = :type_oid;
+        WHERE pg_type.oid = %(type_oid)s;
     '''
 
-    sql_schema = '''
+    sql_schemas = '''
        SELECT pg_catalog.obj_description(oid, 'pg_namespace') AS comment
             , nspname as namespace
          FROM pg_catalog.pg_namespace
@@ -747,7 +772,61 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
             index_definition = idx['indexdef']
             set_index_definition(struct, schema, relname, index_name, index_definition)
 
-        pass
+        # Extract Inheritance information
+        cur.execute(sql_inheritance, {'child_schemaname': schema, 'child_tablename': relname})
+        inheritance = fetchall_as_list_of_dict(cur)
+        for inherit in inheritance:
+            parent_schemaname = inherit['par_schemaname']
+            parent_tablename = inherit['par_tablename']
+            set_table_inherit(struct, schema, relname, parent_schemaname, parent_tablename)
+
+    # Function Handling
+    if table_out is None:
+        cur.execute(sql_functions)
+        functions = fetchall_as_list_of_dict(cur)
+        for function in functions:
+            schema = function['namespace']
+            comment = function['comment']
+            functionargs = function['function_args']
+            types = functionargs.split()
+            count = 0
+
+            # Pre-setup argument names when available.
+            argnames = function['function_arg_names']
+
+            # Setup full argument types including the parameter name
+            parameters = list()
+            for type_oid in types:
+                cur.execute(sql_function_arg, {'type_oid': type_oid, })
+                function_arg = fetchall_as_list_of_dict(cur)
+                assert len(function_arg) == 1
+                parameter = argnames.pop(0) + ' ' if argnames else ''
+                if function_arg[0]['namespace'] != system_schema:
+                    parameter = parameter + function_arg[0]['namespace'] + '.'
+                parameter = parameter + function_arg[0]['type_name']
+                parameters.append(parameter)
+            functionname = '{}({})'.format(function['function_name'], ', '.join(parameters))
+
+            ret_type = 'SET OF ' if function['returns_set'] else ''
+            cur.execute(sql_function_arg, {'type_oid': function['return_type']})
+            function_arg = fetchall_as_list_of_dict(cur)
+            assert len(function_arg) == 1
+            ret_type = ret_type + function_arg[0]['type_name']
+
+            set_function_attribute(struct, schema, functionname, 'COMMENT', comment)
+            set_function_attribute(struct, schema, functionname, 'SOURCE', function['source_code'])
+            set_function_attribute(struct, schema, functionname, 'LANGUAGE', function['language_name'])
+            set_function_attribute(struct, schema, functionname, 'RETURNS', ret_type)
+
+    # Deal with the Schema
+    cur.execute(sql_schemas)
+    schemas = fetchall_as_list_of_dict(cur)
+    for schema in schemas:
+        comment = schema['comment']
+        namespace = schema['namespace']
+        set_schema_comment(struct, namespace, comment)
+
+    cur.close()
 
 
 #####
