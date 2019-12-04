@@ -2,6 +2,7 @@
 #   -d sandbox -u postgres --password 1 -t html
 import argparse
 from decimal import Decimal
+from htmltmpl import TemplateManager, TemplateProcessor
 import json
 import os
 import psycopg2
@@ -279,7 +280,8 @@ def main():
 #
 # Pull out all of the applicable information about a specific database
 def info_collect(conn, db, database, only_schema, only_matching, statistics, table_out):
-    struct = db['STRUCT'] = dict()
+    db[database] = dict()
+    struct = db[database]['STRUCT'] = dict()
 
     # PostgreSQL's version is used to determine what queries are required
     # to retrieve a given information set.
@@ -748,7 +750,7 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
             numcols = len(keylist)
 
             # Bump group number if there are two or more columns involved
-            if numcols >= 2 :
+            if numcols >= 2:
                 fkgroup = fkgroup + 1
 
             # Record the foreign key to structure
@@ -833,15 +835,215 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
 # write_using_templates
 #
 # Generate structure that HTML::Template requires out of the
-# $struct for table related information, and $struct for
+# 'STRUCT' for table related information, and 'STRUCT' for
 # the schema and function information
 def write_using_templates(db, database, statistics, template_path, output_filename_base, wanted_output):
-    print('write_using_templates')
-    as_json = json.dumps({'db': db, 'database': database, 'statistics': statistics,
-                          'template_path': template_path, 'output_filename_base': output_filename_base,
-                          'wanted_output': wanted_output}, indent=2, cls=PgJsonEncoder)
-    print(as_json)
-    pass
+    struct = db[database]['STRUCT']
+
+    schemas = list()
+
+    # Start at 0, increment to 1 prior to use.
+    object_id = 0
+    tableids = dict()
+    for schema in sorted(struct.keys()):
+        tablenames = sorted(struct[schema]['TABLE'].keys()) if 'TABLE' in struct[schema] else []
+        for table in tablenames:
+            table_attr = struct[schema]['TABLE'][table]
+            # Column List
+            columns = list()
+            columnnames = sorted(table_attr['COLUMN'].keys(),
+                                 key=lambda column_name: table_attr['COLUMN'][column_name]['ORDER'])
+            for column in columnnames:
+                column_attr = table_attr['COLUMN'][column]
+                inferrednotnull = 0
+
+                # Have a shorter default for places that require it
+                shortdefault = column_attr['DEFAULT']
+                if shortdefault:
+                    shortdefault = re.sub('^(.{17}).{5,}(.{5})$', '\\1 ... \\2', shortdefault)
+
+                # Deal with column constraints
+                colconstraints = list()
+                connames = sorted(column_attr['CON'].keys()) if 'CON' in column_attr else []
+                for con in connames:
+                    con_attr = column_attr['CON'][con]
+                    if con_attr['TYPE'] == 'UNIQUE':
+                        unq = con_attr['TYPE']
+                        unqcol = con_attr['COLNUM']
+                        unqgroup = con_attr['KEYGROUP'] if 'KEYGROUP' in con_attr else None
+                        colconstraints.append({
+                            'column_unique': unq,
+                            'column_unique_colnum': unqcol,
+                            'column_unique_keygroup': unqgroup,
+                        })
+                    elif con_attr['TYPE'] == 'PRIMARY KEY':
+                        inferrednotnull = 1
+                        colconstraints.append({
+                            'column_primary_key': 'PRIMARY KEY',
+                        })
+                    elif con_attr['TYPE'] == 'FOREIGN KEY':
+                        fksgmlid = sgml_safe_id(
+                            '.'.join((con_attr['FKSCHEMA'], table_attr['TYPE'], con_attr['FKTABLE'])))
+                        fkgroup = con_attr['KEYGROUP'] if 'KEYGROUP' in con_attr else None
+                        fktable = con_attr['FKTABLE']
+                        fkcol = con_attr['FK-COL NAME']
+                        fkschema = con_attr['FKSCHEMA']
+                        colconstraints.append({
+                            'column_fk': 'FOREIGN KEY',
+                            'column_fk_colnum': fkcol,
+                            'column_fk_keygroup': fkgroup,
+                            'column_fk_schema': fkschema,
+                            'column_fk_schema_dbk': docbook(fkschema),
+                            'column_fk_schema_dot': graphviz(fkschema),
+                            'column_fk_sgmlid': fksgmlid,
+                            'column_fk_table': fktable,
+                            'column_fk_table_dbk': docbook(fktable),
+                        })
+
+                        # only have the count if there is more than 1 schema
+                        if len(struct) > 1:
+                            colconstraints[-1]['number_of_schemas'] = len(struct)
+
+                # Generate the Column array
+                columns.append({
+                    'column': column,
+                    'column_dbk': docbook(column),
+                    'column_dot': graphviz(column),
+                    'column_default': column_attr['DEFAULT'],
+                    'column_default_dbk': docbook(column_attr['DEFAULT']),
+                    'column_default_short': shortdefault,
+                    'column_default_short_dbk': docbook(shortdefault),
+
+                    'column_comment': column_attr['DESCRIPTION'],
+                    'column_comment_dbk': docbook(column_attr['DESCRIPTION']),
+
+                    'column_number': column_attr['ORDER'],
+
+                    'column_type': column_attr['TYPE'],
+                    'column_type_dbk': docbook(column_attr['TYPE']),
+                    'column_type_dot': graphviz(column_attr['TYPE']),
+
+                    'column_constraints': colconstraints,
+                })
+
+                if inferrednotnull == 0:
+                    columns[-1]["column_constraint_notnull"] = column_attr['NULL']
+
+            # Constraint List
+            constraints = list()
+            for constraint in sorted(table_attr['CONSTRAINT'].keys() if 'CONSTRAINT' in table_attr else []):
+                shortcon = table_attr['CONSTRAINT'][constraint]
+                shortcon = re.sub('^(.{30}).{5,}(.{5})$', '\\1 ... \\2', shortcon)
+                constraints.append({
+                    'constraint': table_attr['CONSTRAINT'][constraint],
+                    'constraint_dbk': docbook(table_attr['CONSTRAINT'][constraint]),
+                    'constraint_name': constraint,
+                    'constraint_name_dbk': docbook(constraint),
+                    'constraint_short': shortcon,
+                    'constraint_short_dbk': docbook(shortcon),
+                    'table': table,
+                    'table_dbk': docbook(table),
+                    'table_dot': graphviz(table),
+                })
+
+            # Index List
+            indexes = list()
+            for index in sorted(table_attr['INDEX'].keys() if 'INDEX' in table_attr else []):
+                indexes.append({
+                    'index_definition': table_attr['INDEX'][index],
+                    'index_definition_dbk': docbook(table_attr['INDEX'][index]),
+                    'index_name': index,
+                    'index_name_dbk': docbook(index),
+                    'table': table,
+                    'table_dbk': docbook(table),
+                    'table_dot': graphviz(table),
+                    'schema': schema,
+                    'schema_dbk': docbook(schema),
+                    'schema_dot': graphviz(schema),
+                })
+
+            inherits = list()
+            for inhSch in sorted(table_attr['INHERIT'].keys() if 'INHERIT' in table_attr else []):
+                for inhTab in sorted(table_attr['INHERIT'][inhSch].keys()):
+                    inherits.append({
+                        'table': table,
+                        'table_dbk': docbook(table),
+                        'table_dot': graphviz(table),
+                        'schema': schema,
+                        'schema_dbk': docbook(schema),
+                        'schema_dot': graphviz(schema),
+                        'sgmlid': sgml_safe_id('.'.join((schema, 'table', table,))),
+                        'parent_sgmlid': sgml_safe_id('.'.join((inhSch, 'table', inhTab))),
+                        'parent_table': inhTab,
+                        'parent_table_dbk': docbook(inhTab),
+                        'parent_table_dot': graphviz(inhTab),
+                        'parent_schema': inhSch,
+                        'parent_schema_dbk': docbook(inhSch),
+                        'parent_schema_dot': graphviz(inhSch),
+                    })
+
+    # debug_as_json = json.dumps(struct, indent=2, cls=PgJsonEncoder)
+    # print(debug_as_json)
+
+    # as_json = json.dumps({'db': db, 'database': database, 'statistics': statistics,
+    #                       'template_path': template_path, 'output_filename_base': output_filename_base,
+    #                       'wanted_output': wanted_output}, indent=2, cls=PgJsonEncoder)
+
+    # Compile or load already precompiled template.
+    template = TemplateManager().prepare(os.path.join(template_path, "html.tmpl"))
+    tproc = TemplateProcessor()
+
+
+######
+# sgml_safe_id
+#   Safe SGML ID Character replacement
+def sgml_safe_id(string):
+    # Lets use the keyword ARRAY in place of the square brackets
+    # to prevent duplicating a non-array equivelent
+    string = re.sub('\\[\\]', 'ARRAY-', string)
+
+    # Brackets, spaces, commads, underscores are not valid 'id' characters
+    # replace with as few -'s as possible.
+    string = re.sub('[ "\',)(_-]+', '-', string)
+
+    # Don't want a - at the end either.  It looks silly.
+    string = re.sub('-$', '', string)
+
+    return string
+
+
+#####
+# docbook
+#    Docbook output is special in that we may or may not want to escape
+#    the characters inside the string depending on a string prefix.
+def docbook(string):
+    if string is not None:
+        if re.match('^@DOCBOOK', string):
+            string = re.sub('^@DOCBOOK', '', string)
+        else:
+            string = re.sub('&(?!(amp|lt|gr|apos|quot);)', '&amp', string)
+            string = re.sub('<', '&lt;', string)
+            string = re.sub('>', '&gt;', string)
+            string = re.sub("'", '&apos;', string)
+            string = re.sub('"', '&quot;', string)
+    else:
+        # Return an empty string when all else fails
+        string = ''
+    return string
+
+
+#####
+# graphviz
+#    GraphViz output requires that special characters (like " and whitespace) must be preceeded
+#    by a \ when a part of a lable.
+def graphviz(string):
+    # Ensure we don't return an least a empty string
+    if string is None:
+        string = ''
+
+    string = re.sub('([\\s"\'])', '\\\\\\1', string);
+
+    return string
 
 
 if __name__ == '__main__':
