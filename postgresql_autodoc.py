@@ -1,6 +1,7 @@
 # command line arguments to run in sandbox:
 #   -d sandbox -u postgres --password 1 -t html
 import argparse
+from datetime import datetime
 from decimal import Decimal
 from htmltmpl import TemplateManager, TemplateProcessor
 import json
@@ -478,7 +479,7 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
     sql_foreign_keys = '''
        SELECT pg_constraint.oid
             , pg_namespace.nspname AS namespace
-            , CASE WHEN substring(pg_constraint.conname FROM 1 FOR 1) = '\$' THEN ''
+            , CASE WHEN substring(pg_constraint.conname FROM 1 FOR 1) = '\\$' THEN ''
               ELSE pg_constraint.conname
               END AS constraint_name
             , conkey AS constraint_key
@@ -560,7 +561,7 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
     cur.execute(sql_database)
     rows = fetchall_as_list_of_dict(cur)
     if rows:
-        db['COMMENT'] = rows[0]['comment']
+        db[database]['COMMENT'] = rows[0]['comment']
 
     # Fetch tables and all things bound to tables
     permission_flag_to_str = {
@@ -584,6 +585,9 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
 
         # Empty acl groups cause serious issues.
         acl = '' if acl is None else acl
+
+        # TODO remove this stub
+        acl = '{mydbname=arwdxt/mydbname,mydbuser=r/mydbname}'
 
         # Strip array forming 'junk'.
         acl = acl.strip('{}').replace('"', '')
@@ -831,6 +835,173 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
     cur.close()
 
 
+######
+# sgml_safe_id
+#   Safe SGML ID Character replacement
+def sgml_safe_id(string):
+    # Lets use the keyword ARRAY in place of the square brackets
+    # to prevent duplicating a non-array equivelent
+    string = re.sub('\\[\\]', 'ARRAY-', string)
+
+    # Brackets, spaces, commads, underscores are not valid 'id' characters
+    # replace with as few -'s as possible.
+    string = re.sub('[ "\',)(_-]+', '-', string)
+
+    # Don't want a - at the end either.  It looks silly.
+    string = re.sub('-$', '', string)
+
+    return string
+
+
+#####
+# useUnits
+#    Tack on base 2 metric units
+def use_units(value):
+    if value is None:
+        return ''
+
+    units = ('Bytes', 'KiBytes', 'MiBytes', 'GiBytes', 'TiBytes')
+    loop = 0
+
+    while value >= 1024:
+        loop = loop + 1
+        value = value / 1024
+
+    return '%.2f %s' % (value, units[loop])
+
+
+#####
+# docbook
+#    Docbook output is special in that we may or may not want to escape
+#    the characters inside the string depending on a string prefix.
+def docbook(string):
+    if string is None:
+        return ''
+    elif isinstance(string, int):
+        return str(string)
+    elif isinstance(string, str):
+        if re.match('^@DOCBOOK', string):
+            string = re.sub('^@DOCBOOK', '', string)
+        else:
+            string = re.sub('&(?!(amp|lt|gr|apos|quot);)', '&amp', string)
+            string = re.sub('<', '&lt;', string)
+            string = re.sub('>', '&gt;', string)
+            string = re.sub("'", '&apos;', string)
+            string = re.sub('"', '&quot;', string)
+    else:
+        assert False
+    return string
+
+
+#####
+# graphviz
+#    GraphViz output requires that special characters (like " and whitespace) must be preceeded
+#    by a \ when a part of a lable.
+def graphviz(string):
+    # Ensure we don't return an least a empty string
+    if string is None:
+        string = ''
+
+    string = re.sub('([\\s"\'])', '\\\\\\1', string)
+
+    return string
+
+
+#####
+# sql_prettyprint
+#    Clean up SQL into something presentable
+def sql_prettyprint(string):
+    # If nothing has been sent in, return an empty string
+    if string is None:
+        return ''
+
+    # Initialize Result string
+    result = ''
+
+    # List of tokens to split on
+    tok = "SELECT|FROM|WHERE|HAVING|GROUP BY|ORDER BY|OR|AND|LEFT JOIN|RIGHT JOIN" \
+          "|LEFT OUTER JOIN|LEFT INNER JOIN|INNER JOIN|RIGHT OUTER JOIN|RIGHT INNER JOIN" \
+          "|JOIN|UNION ALL|UNION|EXCEPT|USING|ON|CAST|[\\(\\),]"
+
+    key = 0
+    bracket = 0
+    depth = 0
+    indent = 6
+
+    # XXX: Split is wrong -- match would do
+    pattern = '\\(\\"[^\\"]*\\"|\'[^\']*\'|' + tok
+    elems = list()
+    pos = 0
+    while pos < len(string):
+        m = re.search(pattern, string[pos:])
+        if m is None:
+            tail = string[pos:]
+            elems.append(tail)
+            pos = len(string)
+        else:
+            elem_before_token = string[pos:pos + m.start()]
+            token = m.group()
+            elems.append(elem_before_token)
+            elems.append(token)
+            pos = pos + m.start() + len(token)
+
+    for elem in elems:
+        format = None
+
+        # Skip junk tokens
+        if re.match('^[\\s]?$', elem):
+            continue
+
+        # NOTE: Should we drop leading spaces?
+        #    elem.lstrip()
+
+        # Close brackets are special
+        # Bring depth in a level
+        if re.match('\\)', elem):
+            depth = depth - indent
+            if key == 1 or bracket == 1:
+                format = '%s%s'
+            else:
+                format = '%s\n%{}s'.format(depth)
+
+            key = 0
+            bracket = 0
+
+        # Open brackets are special
+        # Bump depth out a level
+        elif re.match('\\(', elem):
+            if key == 1:
+                format = '%s %s'
+            else:
+                format = '%s\n%{}s'.format(depth)
+            depth = depth + indent
+            bracket = 1
+            key = 0
+
+        # Key element
+        # Token from our list -- format on left hand side of the equation
+        # when appropriate.
+        elif re.match(tok, elem):
+            if key == 1:
+                format = '%s%s'
+            else:
+                format = '%s\n%{}s'.format(depth)
+
+            key = 1
+            bracket = 0
+
+        # Value
+        # Format for right hand side of the equation
+        else:
+            format = '%s%s'
+            key = 0
+
+        # Add the new format string to the result
+        result = format % (result, elem)
+
+    return result
+
+
 #####
 # write_using_templates
 #
@@ -846,9 +1017,11 @@ def write_using_templates(db, database, statistics, template_path, output_filena
     object_id = 0
     tableids = dict()
     for schema in sorted(struct.keys()):
-        tablenames = sorted(struct[schema]['TABLE'].keys()) if 'TABLE' in struct[schema] else []
+        schema_attr = struct[schema]
+        tables = list()
+        tablenames = sorted(schema_attr['TABLE'].keys()) if 'TABLE' in schema_attr else []
         for table in tablenames:
-            table_attr = struct[schema]['TABLE'][table]
+            table_attr = schema_attr['TABLE'][table]
             # Column List
             columns = list()
             columnnames = sorted(table_attr['COLUMN'].keys(),
@@ -982,68 +1155,271 @@ def write_using_templates(db, database, statistics, template_path, output_filena
                         'parent_schema_dot': graphviz(inhSch),
                     })
 
-    # debug_as_json = json.dumps(struct, indent=2, cls=PgJsonEncoder)
-    # print(debug_as_json)
+            # Foreign Key Discovery
+            #
+            # lastmatch is used to ensure that we only supply a result a
+            # single time and not once for each link found.  Since the
+            # loops are sorted, we only need to track the last element, and
+            # not all supplied elements.
+            fk_schemas = list()
+            lastmatch = tuple()
+            for fk_schema in sorted(struct.keys()):
+                fk_schema_attr = struct[fk_schema]
+                for fk_table in sorted(fk_schema_attr['TABLE'] if 'TABLE' in fk_schema_attr else []):
+                    fk_table_attr = fk_schema_attr['TABLE'][fk_table]
+                    for fk_column in sorted(fk_table_attr['COLUMN'] if 'COLUMN' in fk_table_attr else []):
+                        fk_column_attr = fk_table_attr['COLUMN'][fk_column]
+                        for fk_con in sorted(fk_column_attr['CON'] if 'CON' in fk_column_attr else []):
+                            con_attr = fk_column_attr['CON'][fk_con]
+                            if con_attr['TYPE'] == 'FOREIGN KEY' and con_attr['FKTABLE'] == table and con_attr[
+                                'FKSCHEMA'] == schema and lastmatch != (fk_schema, fk_table):
+                                fksgmlid = sgml_safe_id('.'.join((fk_schema, fk_table_attr['TYPE'], fk_table)))
+                                fk_schemas.append({
+                                    'fk_column_number': fk_column_attr['ORDER'],
+                                    'fk_sgmlid': fksgmlid,
+                                    'fk_schema': fk_schema,
+                                    'fk_schema_dbk': docbook(fk_schema),
+                                    'fk_schema_dot': graphviz(fk_schema),
+                                    'fk_table': fk_table,
+                                    'fk_table_dbk': docbook(fk_table),
+                                    'fk_table_dot': graphviz(fk_table),
+                                })
 
-    # as_json = json.dumps({'db': db, 'database': database, 'statistics': statistics,
-    #                       'template_path': template_path, 'output_filename_base': output_filename_base,
-    #                       'wanted_output': wanted_output}, indent=2, cls=PgJsonEncoder)
+                                # only have the count if there is more than 1 schema
+                                if len(struct) > 1:
+                                    fk_schemas[-1]["number_of_schemas"] = len(struct)
 
-    # Compile or load already precompiled template.
-    template = TemplateManager().prepare(os.path.join(template_path, "html.tmpl"))
-    tproc = TemplateProcessor()
+                                lastmatch = (fk_schema, fk_table)
 
+            # List off permissions
+            permissions = list()
+            for user in sorted(table_attr['ACL'] if 'ACL' in table_attr else []):
+                permissions.append({
+                    'schema': schema,
+                    'schema_dbk': docbook(schema),
+                    'schema_dot': graphviz(schema),
+                    'table': table,
+                    'table_dbk': docbook(table),
+                    'table_dot': graphviz(table),
+                    'user': user,
+                    'user_dbk': docbook(user),
+                })
 
-######
-# sgml_safe_id
-#   Safe SGML ID Character replacement
-def sgml_safe_id(string):
-    # Lets use the keyword ARRAY in place of the square brackets
-    # to prevent duplicating a non-array equivelent
-    string = re.sub('\\[\\]', 'ARRAY-', string)
+                # only have the count if there is more than 1 schema
+                if len(struct) > 1:
+                    permissions[-1]["number_of_schemas"] = len(struct)
 
-    # Brackets, spaces, commads, underscores are not valid 'id' characters
-    # replace with as few -'s as possible.
-    string = re.sub('[ "\',)(_-]+', '-', string)
+                for perm in table_attr['ACL'][user].keys():
+                    if table_attr['ACL'][user][perm] == 1:
+                        perm_lower = re.sub('^FLAG_', 'flag_', perm) if perm.startswith('FLAG_') else perm.lower()
+                        permissions[-1][perm_lower] = 1
 
-    # Don't want a - at the end either.  It looks silly.
-    string = re.sub('-$', '', string)
+            # Increment and record the object ID
+            object_id = object_id + 1
+            tableids[schema + '.' + table] = object_id
+            viewdef = sql_prettyprint(table_attr['VIEW_DEF'])
 
-    return string
+            # Truncate comment for Dia
+            comment_dia = table_attr['DESCRIPTION']
+            if comment_dia:
+                comment_dia = re.sub('^(.{35}).{5,}(.{5})$', '\\1 ... \\2', comment_dia)
 
+            table_stat_attr = lambda name: table_attr[name] if name in table_attr else None
 
-#####
-# docbook
-#    Docbook output is special in that we may or may not want to escape
-#    the characters inside the string depending on a string prefix.
-def docbook(string):
-    if string is not None:
-        if re.match('^@DOCBOOK', string):
-            string = re.sub('^@DOCBOOK', '', string)
-        else:
-            string = re.sub('&(?!(amp|lt|gr|apos|quot);)', '&amp', string)
-            string = re.sub('<', '&lt;', string)
-            string = re.sub('>', '&gt;', string)
-            string = re.sub("'", '&apos;', string)
-            string = re.sub('"', '&quot;', string)
-    else:
-        # Return an empty string when all else fails
-        string = ''
-    return string
+            tables.append({
+                'object_id': object_id,
+                'object_id_dbk': docbook(object_id),
 
+                'schema': schema,
+                'schema_dbk': docbook(schema),
+                'schema_dot': graphviz(schema),
+                'schema_sgmlid': sgml_safe_id(schema + '.schema'),
 
-#####
-# graphviz
-#    GraphViz output requires that special characters (like " and whitespace) must be preceeded
-#    by a \ when a part of a lable.
-def graphviz(string):
-    # Ensure we don't return an least a empty string
-    if string is None:
-        string = ''
+                # Statistics
+                'stats_enabled': statistics,
+                'stats_dead_bytes': use_units(table_stat_attr('DEADTUPLELEN')),
+                'stats_dead_bytes_dbk': docbook(use_units(table_stat_attr('DEADTUPLELEN'))),
+                'stats_free_bytes': use_units(table_stat_attr('FREELEN')),
+                'stats_free_bytes_dbk': docbook(use_units(table_stat_attr('FREELEN'))),
+                'stats_table_bytes': use_units(table_stat_attr('TABLELEN')),
+                'stats_table_bytes_dbk': docbook(use_units(table_stat_attr('TABLELEN'))),
+                'stats_tuple_count': table_stat_attr('TUPLECOUNT'),
+                'stats_tuple_count_dbk': docbook(table_stat_attr('TUPLECOUNT')),
+                'stats_tuple_bytes': use_units(table_stat_attr('TUPLELEN')),
+                'stats_tuple_bytes_dbk': docbook(use_units(table_stat_attr('TUPLELEN'))),
 
-    string = re.sub('([\\s"\'])', '\\\\\\1', string);
+                'table': table,
+                'table_dbk': docbook(table),
+                'table_dot': graphviz(table),
+                'table_sgmlid': sgml_safe_id('.'.join((schema, table_attr['TYPE'], table))),
+                'table_comment': table_attr['DESCRIPTION'],
+                'table_comment_dbk': docbook(table_attr['DESCRIPTION']),
+                'table_comment_dia': comment_dia,
+                'view_definition': viewdef,
+                'view_definition_dbk': docbook(viewdef),
 
-    return string
+                # lists
+                'columns': columns,
+                'constraints': constraints,
+                'fk_schemas': fk_schemas,
+                'indexes': indexes,
+                'inherits': inherits,
+                'permissions': permissions,
+            })
+
+            # only have the count if there is more than 1 schema
+            if len(struct) > 1:
+                tables[-1]["number_of_schemas"] = len(struct)
+
+        # Dump out list of functions
+        functions = list()
+        for function in sorted(schema_attr['FUNCTION'].keys() if 'FUNCTION' in schema_attr else []):
+            function_attr = schema_attr['FUNCTION'][function]
+            functions.append({
+                'function': function,
+                'function_dbk': docbook(function),
+                'function_sgmlid': sgml_safe_id('.'.join((schema, 'function', function))),
+                'function_comment': function_attr['COMMENT'],
+                'function_comment_dbk': docbook(function_attr['COMMENT']),
+                'function_language': function_attr['LANGUAGE'].upper(),
+                'function_returns': function_attr['RETURNS'],
+                'function_source': function_attr['SOURCE'],
+                'schema': schema,
+                'schema_dbk': docbook(schema),
+                'schema_dot': graphviz(schema),
+                'schema_sgmlid': sgml_safe_id(schema + '.schema'),
+            })
+
+            # only have the count if there is more than 1 schema
+            if len(struct) > 1:
+                functions[-1]["number_of_schemas"] = len(struct)
+
+        schemas.append({
+            'schema': schema,
+            'schema_dbk': docbook(schema),
+            'schema_dot': graphviz(schema),
+            'schema_sgmlid': sgml_safe_id(schema + '.schema'),
+            'schema_comment': schema_attr['SCHEMA']['COMMENT'],
+            'schema_comment_dbk': docbook(schema_attr['SCHEMA']['COMMENT']),
+
+            # lists
+            'functions': functions,
+            'tables': tables,
+        })
+
+        # Build the array of schemas
+        if len(struct) > 1:
+            schemas[-1]["number_of_schemas"] = len(struct)
+
+    # Link the various components together via the template.
+    fk_links = list()
+    fkeys = list()
+    for schema in sorted(struct.keys()):
+        schema_attr = struct[schema]
+        for table in sorted(schema_attr['TABLE'].keys() if 'TABLE' in schema_attr else []):
+            table_attr = schema_attr['TABLE'][table]
+            columnnames = sorted(table_attr['COLUMN'].keys(),
+                                 key=lambda column_name: table_attr['COLUMN'][column_name]['ORDER'])
+            for column in columnnames:
+                column_attr = table_attr['COLUMN'][column]
+                for con in sorted(column_attr['CON'].keys() if 'CON' in column_attr else []):
+                    con_attr = column_attr['CON'][con]
+                    # To prevent a multi-column foreign key from appearing
+                    # several times, we've opted
+                    # to simply display the first column of any given key.
+                    #  Since column numbering always starts at 1
+                    # for foreign keys.
+                    if con_attr['TYPE'] == 'FOREIGN KEY' and con_attr['COLNUM'] == 1:
+                        # Pull out some of the longer keys
+                        ref_table = con_attr['FKTABLE']
+                        ref_schema = con_attr['FKSCHEMA']
+                        ref_column = con_attr['FK-COL NAME']
+
+                        # Default values cause these elements to attach
+                        # to the bottom in Dia
+                        # If a KEYGROUP is not defined, it's a single column.
+                        #  Modify the ref_con and key_con variables to attach
+                        # the to the columns connection point directly.
+                        ref_con = 0
+                        key_con = 0
+                        keycon_offset = 0
+                        if 'KEYGROUP' not in con_attr:
+                            ref_con = struct[ref_schema]['TABLE'][ref_table]['COLUMN'][ref_column]['ORDER']
+                            key_con = column_attr['ORDER']
+                            keycon_offset = 1
+
+                        # Bump object_id
+                        object_id = object_id + 1
+
+                        fk_links.append({
+                            'fk_link_name': con,
+                            'fk_link_name_dbk': docbook(con),
+                            'fk_link_name_dot': graphviz(con),
+                            'handle0_connection': key_con,
+                            'handle0_connection_dbk': docbook(key_con),
+                            'handle0_connection_dia': 6 + (key_con * 2),
+                            'handle0_name': table,
+                            'handle0_name_dbk': docbook(table),
+                            'handle0_schema': schema,
+                            'handle0_to': tableids[schema + '.' + table],
+                            'handle0_to_dbk': docbook(tableids[schema + '.' + table]),
+                            'handle1_connection': ref_con,
+                            'handle1_connection_dbk': docbook(ref_con),
+                            'handle1_connection_dia': 6 + (ref_con * 2) + keycon_offset,
+                             'handle1_name': ref_table,
+                            'handle1_name_dbk': docbook(ref_table),
+                            'handle1_schema': ref_schema,
+                            'handle1_to': tableids[ref_schema + '.' + ref_table],
+                            'handle1_to_dbk': docbook(tableids[ref_schema + '.' + ref_table]),
+                            'object_id': object_id,
+                            'object_id_dbk': docbook(object_id),
+                        })
+
+                        # Build the array of schemas
+                        if len(struct) > 1:
+                            fk_links[-1]["number_of_schemas"] = len(struct)
+
+    # Make database level comment information
+    dumped_on = datetime.now().strftime('%Y-%m-%d')
+    database_comment = db[database]['COMMENT']
+
+    # Loop through each template found in the supplied path.
+    # Output the results of the template as <filename>.<extension>
+    # into the current working directory.
+    template_files = list()
+    for dir, _, files in os.walk(template_path):
+        for file in files:
+            if os.path.splitext(file)[1] == '.tmpl':
+                template_files.append(os.path.join(dir, file))
+
+    # Ensure we've told the user if we don't find any files.
+    if not template_files:
+        raise RuntimeError('Templates files not found in {}'.format(template_path))
+
+    # Process all found templates.
+    for template_file in template_files:
+        file_extension = os.path.splitext(os.path.split(template_file)[1])[0]
+        if wanted_output and file_extension != wanted_output:
+            continue
+        output_filename = output_filename_base  + '.' + file_extension
+        print('Producing {} from {}'.format(output_filename, template_file))
+
+        template = TemplateManager(debug=0).prepare(template_file)
+        tproc = TemplateProcessor(debug=0)
+
+        tproc.set('database', database)
+        tproc.set('database_dbk', docbook(database))
+        tproc.set('database_sgmlid', sgml_safe_id(database))
+        tproc.set('database_comment', database_comment)
+        tproc.set('database_comment_dbk', docbook(database_comment))
+        tproc.set('dumped_on', dumped_on)
+        tproc.set('dumped_on_dbk', docbook(dumped_on))
+        tproc.set('fk_links', fk_links)
+        tproc.set('schemas', schemas)
+
+        # Print the processed template.
+        with open(output_filename, mode='w') as f:
+            f.write(tproc.process(template))
 
 
 if __name__ == '__main__':
