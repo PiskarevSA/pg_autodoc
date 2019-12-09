@@ -1,5 +1,6 @@
 # command line arguments to run in sandbox:
 #   -d sandbox -u postgres --password 1 -t html
+#   --host 192.168.12.207 -p 5432 -d radar_db -u postgres --statistics --password=123 --library templates
 import argparse
 from datetime import datetime
 from decimal import Decimal
@@ -281,6 +282,7 @@ def main():
 #
 # Pull out all of the applicable information about a specific database
 def info_collect(conn, db, database, only_schema, only_matching, statistics, table_out):
+    print('collecting data')
     db[database] = dict()
     struct = db[database]['STRUCT'] = dict()
 
@@ -334,18 +336,20 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
                 'table'
               WHEN relkind = 's' THEN
                 'special'
+              WHEN relkind = 'm' THEN
+                'materialized view'
               ELSE
                 'view'
               END as reltype
             , CASE
-              WHEN relkind = 'v' THEN
+              WHEN relkind IN ('m', 'v') THEN
                 pg_get_viewdef(pg_class.oid)
               ELSE
                 NULL
               END as view_definition
          FROM pg_catalog.pg_class
          JOIN pg_catalog.pg_namespace ON (relnamespace = pg_namespace.oid)
-        WHERE relkind IN ('r', 's', 'v')
+        WHERE relkind IN ('r', 's', 'm', 'v')
           AND relname ~ '{}'
           AND nspname !~ '{}'
           AND nspname ~ '{}' 
@@ -575,6 +579,8 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
     }
     cur.execute(sql_tables)
     tables = fetchall_as_list_of_dict(cur)
+    print('item count: {}'.format(len(tables)))
+    item_index = 0
     for table in tables:
         reloid = table['oid']
         relname = table['tablename']
@@ -785,6 +791,10 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
             parent_schemaname = inherit['par_schemaname']
             parent_tablename = inherit['par_tablename']
             set_table_inherit(struct, schema, relname, parent_schemaname, parent_tablename)
+
+        print(
+            'item {} of {} processed: {} {}.{}'.format(item_index + 1, len(tables), table['reltype'], schema, relname))
+        item_index = item_index + 1
 
     # Function Handling
     if table_out is None:
@@ -1249,6 +1259,7 @@ def write_using_templates(db, database, statistics, template_path, output_filena
                 'stats_tuple_bytes_dbk': docbook(use_units(table_stat_attr('TUPLELEN'))),
 
                 'table': table,
+                'table_type': table_attr['TYPE'],
                 'table_dbk': docbook(table),
                 'table_dot': graphviz(table),
                 'table_sgmlid': sgml_safe_id('.'.join((schema, table_attr['TYPE'], table))),
@@ -1366,7 +1377,7 @@ def write_using_templates(db, database, statistics, template_path, output_filena
                             'handle1_connection': ref_con,
                             'handle1_connection_dbk': docbook(ref_con),
                             'handle1_connection_dia': 6 + (ref_con * 2) + keycon_offset,
-                             'handle1_name': ref_table,
+                            'handle1_name': ref_table,
                             'handle1_name_dbk': docbook(ref_table),
                             'handle1_schema': ref_schema,
                             'handle1_to': tableids[ref_schema + '.' + ref_table],
@@ -1382,6 +1393,8 @@ def write_using_templates(db, database, statistics, template_path, output_filena
     # Make database level comment information
     dumped_on = datetime.now().strftime('%Y-%m-%d')
     database_comment = db[database]['COMMENT']
+    if database_comment is None:
+        database_comment = ''
 
     # Loop through each template found in the supplied path.
     # Output the results of the template as <filename>.<extension>
@@ -1401,7 +1414,7 @@ def write_using_templates(db, database, statistics, template_path, output_filena
         file_extension = os.path.splitext(os.path.split(template_file)[1])[0]
         if wanted_output and file_extension != wanted_output:
             continue
-        output_filename = output_filename_base  + '.' + file_extension
+        output_filename = output_filename_base + '.' + file_extension
         print('Producing {} from {}'.format(output_filename, template_file))
 
         template = TemplateManager(debug=0).prepare(template_file)
