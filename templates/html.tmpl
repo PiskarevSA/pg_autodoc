@@ -112,7 +112,7 @@
 <body>
 
 <!-- Primary Index -->
-<p><!-- TMPL_VAR ESCAPE="HTML" name="database_comment" --><br><br>Dumped on <!-- TMPL_VAR ESCAPE="HTML" name="dumped_on" --></p>
+<p><!-- TMPL_VAR ESCAPE="NONE" name="database_comment_html" --><br><br>Dumped on <!-- TMPL_VAR ESCAPE="HTML" name="dumped_on" --></p>
 <h1><a name="index">Index of database - <!-- TMPL_VAR ESCAPE="HTML" name="database" --></a></h1>
 <ul>
   <!-- TMPL_LOOP name="schemas" -->
@@ -129,9 +129,9 @@
 <!-- TMPL_IF name="number_of_schemas" -->
 <hr>
 <h1>Schema <!-- TMPL_VAR ESCAPE="HTML" name="schema" --></h1>
-<!-- TMPL_IF name="schema_comment" -->
-<p class="schema_comment"><!-- TMPL_VAR name="schema_comment" --></p>
-<!-- /TMPL_IF name="schema_comment" -->
+<!-- TMPL_IF name="schema_comment_html" -->
+<p class="schema_comment_html"><!-- TMPL_VAR ESCAPE="NONE" name="schema_comment_html" --></p>
+<!-- /TMPL_IF name="schema_comment_html" -->
 
 <!-- /TMPL_IF name="number_of_schemas" -->
 <!-- TMPL_LOOP name="tables" -->
@@ -140,9 +140,9 @@
   <!-- TMPL_IF name="number_of_schemas" -->
   <a href="#<!-- TMPL_VAR ESCAPE="URL" name="schema_sgmlid" -->"><!-- TMPL_VAR ESCAPE="HTML" name="schema" --></a>.<!-- /TMPL_IF name="number_of_schemas" --><a name="<!-- TMPL_VAR ESCAPE="URL" name="table_sgmlid" -->"><!-- TMPL_VAR ESCAPE="HTML" name="table" --></a>
 </h2>
-<!-- TMPL_IF name="table_comment" -->
-<p class="table_comment"><!-- TMPL_VAR ESCAPE="HTML" name="table_comment" --></p>
-<!-- /TMPL_IF name="table_comment" -->
+<!-- TMPL_IF name="table_comment_html" -->
+<p class="table_comment_html"><!-- TMPL_VAR ESCAPE="NONE" name="table_comment_html" --></p>
+<!-- /TMPL_IF name="table_comment_html" -->
 
 
 <table class="schema" width="100%" cellspacing="0" cellpadding="3">
@@ -178,7 +178,7 @@
         <!-- TMPL_IF name="column_constraint_notnull" -->NOT NULL<!-- /TMPL_IF name="column_constraint_notnull" -->
         <!-- TMPL_IF name="column_default" -->DEFAULT <!-- TMPL_VAR ESCAPE="HTML" name="column_default" --><!-- /TMPL_IF name="column_default" -->
       </i>
-      <!-- TMPL_IF name="column_comment" --><br><br><!-- TMPL_VAR ESCAPE="HTML" name="column_comment" --><!-- /TMPL_IF name="column_comment" -->
+      <!-- TMPL_IF name="column_comment_html" --><br><br><!-- TMPL_VAR ESCAPE="NONE" name="column_comment_html" --><!-- /TMPL_IF name="column_comment_html" -->
     </td>
   </tr>
   <!-- /TMPL_LOOP name="columns" -->
@@ -301,7 +301,7 @@
 </h2>
 <h3>Returns: <!-- TMPL_VAR ESCAPE="HTML" name="function_returns" --></h3>
 <h3>Language: <!-- TMPL_VAR ESCAPE="HTML" name="function_language" --></h3>
-<!-- TMPL_IF name="function_comment" --><p><!-- TMPL_VAR ESCAPE="HTML" name="function_comment" --></p><!-- /TMPL_IF name="function_comment" -->
+<!-- TMPL_IF name="function_comment_html" --><p><!-- TMPL_VAR ESCAPE="NONE" name="function_comment_html" --></p><!-- /TMPL_IF name="function_comment_html" -->
 <pre><!-- TMPL_IF name="function_source" --><!-- TMPL_VAR ESCAPE="HTML" name="function_source" --><!-- /TMPL_IF name="function_source" --></pre>
 <!-- /TMPL_LOOP name="functions" -->
 

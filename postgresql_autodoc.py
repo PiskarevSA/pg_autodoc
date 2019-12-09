@@ -593,7 +593,7 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
         acl = '' if acl is None else acl
 
         # TODO remove this stub
-        acl = '{mydbname=arwdxt/mydbname,mydbuser=r/mydbname}'
+        # acl = '{mydbname=arwdxt/mydbname,mydbuser=r/mydbname}'
 
         # Strip array forming 'junk'.
         acl = acl.strip('{}').replace('"', '')
@@ -881,6 +881,27 @@ def use_units(value):
 
 
 #####
+# html
+#    HTML output is special in that we want to escape
+#    the characters inside the string and replace line feed with <br>
+def html(string):
+    if string is None:
+        return ''
+    elif isinstance(string, int):
+        return str(string)
+    elif isinstance(string, str):
+        string = re.sub('&(?!(amp|lt|gr|apos|quot);)', '&amp', string)
+        string = re.sub('<', '&lt;', string)
+        string = re.sub('>', '&gt;', string)
+        string = re.sub("'", '&apos;', string)
+        string = re.sub('"', '&quot;', string)
+        string = re.sub('\n', '<br>', string)
+    else:
+        assert False
+    return string
+
+
+#####
 # docbook
 #    Docbook output is special in that we may or may not want to escape
 #    the characters inside the string depending on a string prefix.
@@ -1099,6 +1120,7 @@ def write_using_templates(db, database, statistics, template_path, output_filena
 
                     'column_comment': column_attr['DESCRIPTION'],
                     'column_comment_dbk': docbook(column_attr['DESCRIPTION']),
+                    'column_comment_html': html(column_attr['DESCRIPTION']),
 
                     'column_number': column_attr['ORDER'],
 
@@ -1267,6 +1289,7 @@ def write_using_templates(db, database, statistics, template_path, output_filena
                 'table_comment': table_attr['DESCRIPTION'],
                 'table_comment_dbk': docbook(table_attr['DESCRIPTION']),
                 'table_comment_dia': comment_dia,
+                'table_comment_html': html(table_attr['DESCRIPTION']),
                 'view_definition': viewdef,
                 'view_definition_dbk': docbook(viewdef),
 
@@ -1293,6 +1316,7 @@ def write_using_templates(db, database, statistics, template_path, output_filena
                 'function_sgmlid': sgml_safe_id('.'.join((schema, 'function', function))),
                 'function_comment': function_attr['COMMENT'],
                 'function_comment_dbk': docbook(function_attr['COMMENT']),
+                'function_comment_html': html(function_attr['COMMENT']),
                 'function_language': function_attr['LANGUAGE'].upper(),
                 'function_returns': function_attr['RETURNS'],
                 'function_source': function_attr['SOURCE'],
@@ -1313,6 +1337,7 @@ def write_using_templates(db, database, statistics, template_path, output_filena
             'schema_sgmlid': sgml_safe_id(schema + '.schema'),
             'schema_comment': schema_attr['SCHEMA']['COMMENT'],
             'schema_comment_dbk': docbook(schema_attr['SCHEMA']['COMMENT']),
+            'schema_comment_html': html(schema_attr['SCHEMA']['COMMENT']),
 
             # lists
             'functions': functions,
@@ -1426,6 +1451,7 @@ def write_using_templates(db, database, statistics, template_path, output_filena
         tproc.set('database_sgmlid', sgml_safe_id(database))
         tproc.set('database_comment', database_comment)
         tproc.set('database_comment_dbk', docbook(database_comment))
+        tproc.set('database_comment_html', html(database_comment))
         tproc.set('dumped_on', dumped_on)
         tproc.set('dumped_on_dbk', docbook(dumped_on))
         tproc.set('fk_links', fk_links)
