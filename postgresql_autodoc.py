@@ -1259,9 +1259,10 @@ def write_using_templates(db, database, statistics, template_path, output_filena
                 'stats_tuple_bytes_dbk': docbook(use_units(table_stat_attr('TUPLELEN'))),
 
                 'table': table,
-                'table_type': table_attr['TYPE'],
                 'table_dbk': docbook(table),
                 'table_dot': graphviz(table),
+                'table_type': table_attr['TYPE'],
+                'table_type_dbk': docbook(table_attr['TYPE']),
                 'table_sgmlid': sgml_safe_id('.'.join((schema, table_attr['TYPE'], table))),
                 'table_comment': table_attr['DESCRIPTION'],
                 'table_comment_dbk': docbook(table_attr['DESCRIPTION']),

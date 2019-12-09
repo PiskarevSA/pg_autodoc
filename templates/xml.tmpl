@@ -21,11 +21,8 @@
       <section id="<!-- TMPL_VAR name="table_sgmlid" -->"
                xreflabel="<!-- TMPL_VAR name="schema_dbk" -->.<!-- TMPL_VAR name="table_dbk" -->">
         <title id="<!-- TMPL_VAR name="table_sgmlid" -->-title">
-         <!-- TMPL_IF name="view_definition" -->View:
-         <database class="table"><!-- TMPL_VAR name="table_dbk" --></database>
-         <!-- TMPL_ELSE -->Table:
-         <database class="view"><!-- TMPL_VAR name="table_dbk" --></database>
-         <!-- /TMPL_IF name="view_definition" -->
+         <!-- TMPL_VAR name="table_type_dbk" -->:
+         <database class="<!-- TMPL_VAR name="table_type_dbk" -->"><!-- TMPL_VAR name="table_dbk" --></database>
         </title>
  
 <!-- TMPL_IF name="table_comment" -->
