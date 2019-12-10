@@ -1,6 +1,6 @@
 # command line arguments to run in sandbox:
 #   -d sandbox -u postgres --password 1 -t html
-#   --host 192.168.12.207 -p 5432 -d radar_db -u postgres --statistics --password=123 --library templates
+#   --host 192.168.12.207 -p 5432 -d radar_db -u postgres --statistics --password=123 --library templates -m ^(?!radar_\d+).*$ -f output/radar_db
 import argparse
 from datetime import datetime
 from decimal import Decimal
@@ -103,6 +103,26 @@ class PgJsonEncoder(json.JSONEncoder):
         if isinstance(o, Decimal):
             return float(o)
         return super(PgJsonEncoder, self).default(o)
+
+
+class ProgressBar:
+    def __init__(self, title, count):
+        self.title = title
+        self.current_index = 0
+        self.count = count
+        self.bar_length = 80
+        print(self.title, '-' * self.bar_length, ' {} items to process'.format(self.count), sep='', flush=True, end='')
+
+    def begin_step(self, about_item):
+        bar_left = self.current_index * self.bar_length // self.count
+        bar_right = self.bar_length - bar_left
+        print('\r', self.title, '=' * bar_left, '-' * bar_right,
+              ' item {} of {} in process: {}'.format(self.current_index + 1, self.count, about_item), sep='',
+              flush=True, end='')
+        self.current_index += 1
+
+    def end(self):
+        print('\r', self.title, '=' * self.bar_length, ' all {} items processed'.format(self.count), sep='', flush=True)
 
 
 def main():
@@ -579,9 +599,11 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
     }
     cur.execute(sql_tables)
     tables = fetchall_as_list_of_dict(cur)
-    print('item count: {}'.format(len(tables)))
-    item_index = 0
-    for table in tables:
+
+    table_bar = ProgressBar('tables:    ', len(tables))
+    for (item_index, table) in enumerate(tables):
+        table_bar.begin_step(table['tablename'])
+
         reloid = table['oid']
         relname = table['tablename']
         schema = table['namespace']
@@ -792,15 +814,15 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
             parent_tablename = inherit['par_tablename']
             set_table_inherit(struct, schema, relname, parent_schemaname, parent_tablename)
 
-        print(
-            'item {} of {} processed: {} {}.{}'.format(item_index + 1, len(tables), table['reltype'], schema, relname))
-        item_index = item_index + 1
+    table_bar.end()
 
     # Function Handling
     if table_out is None:
         cur.execute(sql_functions)
         functions = fetchall_as_list_of_dict(cur)
-        for function in functions:
+        function_bar = ProgressBar('functions: ', len(functions))
+        for function_index, function in enumerate(functions):
+            function_bar.begin_step(function['function_name'])
             schema = function['namespace']
             comment = function['comment']
             functionargs = function['function_args']
@@ -833,6 +855,8 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
             set_function_attribute(struct, schema, functionname, 'SOURCE', function['source_code'])
             set_function_attribute(struct, schema, functionname, 'LANGUAGE', function['language_name'])
             set_function_attribute(struct, schema, functionname, 'RETURNS', ret_type)
+
+        function_bar.end()
 
     # Deal with the Schema
     cur.execute(sql_schemas)
@@ -1040,6 +1064,7 @@ def sql_prettyprint(string):
 # 'STRUCT' for table related information, and 'STRUCT' for
 # the schema and function information
 def write_using_templates(db, database, statistics, template_path, output_filename_base, wanted_output):
+    print('write using templates')
     struct = db[database]['STRUCT']
 
     schemas = list()
