@@ -37,6 +37,42 @@ def set_table_attribute(struct, schema, table, name, value):
         setdefault(table, dict())[name] = value
 
 
+def set_table_affects(struct, schema, table, declaration, target_type, target_schema, target_object):
+    target = struct. \
+        setdefault(schema, dict()). \
+        setdefault('TABLE', dict()). \
+        setdefault(table, dict()). \
+        setdefault('AFFECTS', list())
+    target.append({'DECLARATION': declaration, 'TYPE': target_type, 'SCHEMA': target_schema, 'OBJECT': target_object})
+
+
+def set_table_depends(struct, schema, table, declaration, target_type, target_schema, target_object):
+    target = struct. \
+        setdefault(schema, dict()). \
+        setdefault('TABLE', dict()). \
+        setdefault(table, dict()). \
+        setdefault('DEPENDS', list())
+    target.append({'DECLARATION': declaration, 'TYPE': target_type, 'SCHEMA': target_schema, 'OBJECT': target_object})
+
+
+def set_function_affects(struct, schema, function, declaration, target_type, target_schema, target_object):
+    target = struct. \
+        setdefault(schema, dict()). \
+        setdefault('FUNCTION', dict()). \
+        setdefault(function, dict()). \
+        setdefault('AFFECTS', list())
+    target.append({'DECLARATION': declaration, 'TYPE': target_type, 'SCHEMA': target_schema, 'OBJECT': target_object})
+
+
+def set_function_depends(struct, schema, function, declaration, target_type, target_schema, target_object):
+    target = struct. \
+        setdefault(schema, dict()). \
+        setdefault('FUNCTION', dict()). \
+        setdefault(function, dict()). \
+        setdefault('DEPENDS', list())
+    target.append({'DECLARATION': declaration, 'TYPE': target_type, 'SCHEMA': target_schema, 'OBJECT': target_object})
+
+
 def set_column_attribute(struct, schema, table, column, name, value):
     struct. \
         setdefault(schema, dict()). \
@@ -111,18 +147,25 @@ class ProgressBar:
         self.current_index = 0
         self.count = count
         self.bar_length = 80
-        print(self.title, '-' * self.bar_length, ' {} items to process'.format(self.count), sep='', flush=True, end='')
+        self.bar_content = self.title + '-' * self.bar_length + ' {} items to process'.format(self.count)
+        print(self.bar_content, flush=True, sep='', end='')
 
     def begin_step(self, about_item):
         bar_left = self.current_index * self.bar_length // self.count
         bar_right = self.bar_length - bar_left
-        print('\r', self.title, '=' * bar_left, '-' * bar_right,
-              ' item {} of {} in process: {}'.format(self.current_index + 1, self.count, about_item), sep='',
-              flush=True, end='')
+        self.bar_content = self.title + '=' * bar_left + '-' * bar_right + ' item {} of {} in process: {}'.format(
+            self.current_index + 1, self.count, about_item)
+        print('\r', self.bar_content, flush=True, sep='', end='')
         self.current_index += 1
 
     def end(self):
-        print('\r', self.title, '=' * self.bar_length, ' all {} items processed'.format(self.count), sep='', flush=True)
+        self.bar_content = self.title + '=' * self.bar_length + ' all {} items processed'.format(self.count)
+        print('\r', self.bar_content, flush=True, sep='')
+
+    def message(self, *args, sep=' '):
+        print('\r', sep='', end='')
+        print(*args, sep=sep)
+        print(self.bar_content, flush=True, sep='', end='')
 
 
 def main():
@@ -292,6 +335,10 @@ def main():
 
     info_collect(conn, db, database, only_schema, only_matching, statistics, table_out)
     conn.close()
+
+    output_filename = output_filename_base + '.json'
+    with open(output_filename, 'w') as outfile:
+        json.dump(db, outfile, indent=2, cls=PgJsonEncoder)
 
     # Write out *ALL* templates
     write_using_templates(db, database, statistics, template_path, output_filename_base, wanted_output)
@@ -653,6 +700,31 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
         # Store table description
         set_table_attribute(struct, schema, relname, 'DESCRIPTION', table['table_description'])
 
+        # Store table manual declared dependencies
+        table_description = table['table_description']
+        if table_description is not None:
+            match = re.finditer(r'\\\w+', table_description)
+            for m in match:
+                keyword = m.group()
+                depends = dict()
+                affects = dict()
+                if keyword in ('\\depends', '\\affects'):
+                    mm = re.match(r'\\(?:depends|affects)\s+(\w+):\s*(?:(\w+)\.)?(\w+)', table_description[m.start():])
+                    if mm is not None:
+                        link_start = m.start() + mm.start()
+                        link_len = len(mm.group())
+                        declaration = table_description[link_start:link_start + link_len]
+                        func = set_table_depends if keyword == '\\depends' else set_table_affects
+                        target_type, target_schema, target_object = mm.groups()
+                        func(struct, schema, relname, declaration, target_type, target_schema, target_object)
+                    else:
+                        table_bar.message(
+                            'ERROR: unable to parse keyword arguments in the {}.{} description: {}'.format(
+                                schema, relname, table_description[m.start():]))
+                else:
+                    table_bar.message(
+                        'ERROR: unexpected keyword in the {}.{} description: {}'.format(schema, relname, keyword))
+
         # Store the view definition
         set_table_attribute(struct, schema, relname, 'VIEW_DEF', table['view_definition'])
 
@@ -855,6 +927,34 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
             set_function_attribute(struct, schema, functionname, 'SOURCE', function['source_code'])
             set_function_attribute(struct, schema, functionname, 'LANGUAGE', function['language_name'])
             set_function_attribute(struct, schema, functionname, 'RETURNS', ret_type)
+
+            # Store function manual declared dependencies
+            if comment is not None:
+                match = re.finditer(r'\\\w+', comment)
+                for m in match:
+                    keyword = m.group()
+                    depends = dict()
+                    affects = dict()
+                    if keyword in ('\\depends', '\\affects'):
+                        mm = re.match(r'\\(?:depends|affects)\s+(\w+):\s*(?:(\w+)\.)?(\w+)',
+                                      comment[m.start():])
+                        if mm is not None:
+                            link_start = m.start() + mm.start()
+                            link_len = len(mm.group())
+                            declaration = comment[link_start:link_start + link_len]
+                            func = set_function_depends if keyword == '\\depends' else set_function_affects
+                            target_type, target_schema, target_object = mm.groups()
+                            func(struct, schema, functionname, declaration, target_type, target_schema, target_object)
+                        else:
+                            table_bar.message(
+                                'ERROR: unable to parse keyword arguments in the {}.{} description: {}'.format(
+                                    schema, functionname, comment[m.start():]))
+                    elif keyword == '\\param':
+                        pass  # do nothing
+                    else:
+                        table_bar.message(
+                            'ERROR: unexpected keyword in the {}.{} description: {}'.format(schema, functionname,
+                                                                                            keyword))
 
         function_bar.end()
 
