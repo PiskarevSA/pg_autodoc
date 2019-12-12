@@ -1,5 +1,5 @@
 # command line arguments to run in sandbox:
-#   -d sandbox -u postgres --password 1 -t html
+#   -d sandbox -u postgres --password 1 --statistics -t html
 #   --host 192.168.12.207 -p 5432 -d radar_db -u postgres --statistics --password=123 --library templates -m ^(?!radar_\d+).*$ -f output/radar_db
 import argparse
 from datetime import datetime
@@ -10,6 +10,13 @@ import os
 import psycopg2
 import re
 import sys
+
+
+def elided(text, left, right):
+    mid = ' ... '
+    if (left + len(mid) + right) < len(text):
+        return text[:left] + mid + text[-right:]
+    return text
 
 
 def fetchall_as_list_of_dict(cur):
@@ -35,42 +42,6 @@ def set_table_attribute(struct, schema, table, name, value):
         setdefault(schema, dict()). \
         setdefault('TABLE', dict()). \
         setdefault(table, dict())[name] = value
-
-
-def set_table_affects(struct, schema, table, declaration, target_type, target_schema, target_object):
-    target = struct. \
-        setdefault(schema, dict()). \
-        setdefault('TABLE', dict()). \
-        setdefault(table, dict()). \
-        setdefault('AFFECTS', list())
-    target.append({'DECLARATION': declaration, 'TYPE': target_type, 'SCHEMA': target_schema, 'OBJECT': target_object})
-
-
-def set_table_depends(struct, schema, table, declaration, target_type, target_schema, target_object):
-    target = struct. \
-        setdefault(schema, dict()). \
-        setdefault('TABLE', dict()). \
-        setdefault(table, dict()). \
-        setdefault('DEPENDS', list())
-    target.append({'DECLARATION': declaration, 'TYPE': target_type, 'SCHEMA': target_schema, 'OBJECT': target_object})
-
-
-def set_function_affects(struct, schema, function, declaration, target_type, target_schema, target_object):
-    target = struct. \
-        setdefault(schema, dict()). \
-        setdefault('FUNCTION', dict()). \
-        setdefault(function, dict()). \
-        setdefault('AFFECTS', list())
-    target.append({'DECLARATION': declaration, 'TYPE': target_type, 'SCHEMA': target_schema, 'OBJECT': target_object})
-
-
-def set_function_depends(struct, schema, function, declaration, target_type, target_schema, target_object):
-    target = struct. \
-        setdefault(schema, dict()). \
-        setdefault('FUNCTION', dict()). \
-        setdefault(function, dict()). \
-        setdefault('DEPENDS', list())
-    target.append({'DECLARATION': declaration, 'TYPE': target_type, 'SCHEMA': target_schema, 'OBJECT': target_object})
 
 
 def set_column_attribute(struct, schema, table, column, name, value):
@@ -340,8 +311,14 @@ def main():
     with open(output_filename, 'w') as outfile:
         json.dump(db, outfile, indent=2, cls=PgJsonEncoder)
 
+    info_postprocess(db)
+
+    output_filename = output_filename_base + '.postprocessed.json'
+    with open(output_filename, 'w') as outfile:
+        json.dump(db, outfile, indent=2, cls=PgJsonEncoder)
+
     # Write out *ALL* templates
-    write_using_templates(db, database, statistics, template_path, output_filename_base, wanted_output)
+    write_using_templates(db, database, template_path, output_filename_base, wanted_output)
 
 
 ##
@@ -399,12 +376,14 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
             , pg_catalog.obj_description(pg_class.oid, 'pg_class') as table_description
             , relacl
             , CASE
-              WHEN relkind = 'r' THEN
-                'table'
-              WHEN relkind = 's' THEN
-                'special'
+              WHEN relkind = 'f' THEN
+                'foreign table'
               WHEN relkind = 'm' THEN
                 'materialized view'
+              WHEN relkind = 's' THEN
+                'special'
+              WHEN relkind = 'r' THEN
+                'table'
               ELSE
                 'view'
               END as reltype
@@ -416,7 +395,7 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
               END as view_definition
          FROM pg_catalog.pg_class
          JOIN pg_catalog.pg_namespace ON (relnamespace = pg_namespace.oid)
-        WHERE relkind IN ('r', 's', 'm', 'v')
+        WHERE relkind IN ('f', 'm', 's', 'r', 'v')
           AND relname ~ '{}'
           AND nspname !~ '{}'
           AND nspname ~ '{}' 
@@ -688,42 +667,20 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
             cur.execute(sql_table_statistics, {'table_oid': reloid, })
             stats = fetchall_as_list_of_dict(cur)
             assert len(stats) == 1
+            set_table_attribute(struct, schema, relname, 'HAS_STATISTICS', True)
             set_table_attribute(struct, schema, relname, 'TABLELEN', stats[0]['table_len'])
             set_table_attribute(struct, schema, relname, 'TUPLECOUNT', stats[0]['tuple_count'])
             set_table_attribute(struct, schema, relname, 'TUPLELEN', stats[0]['tuple_len'])
             set_table_attribute(struct, schema, relname, 'DEADTUPLELEN', stats[0]['dead_tuple_len'])
             set_table_attribute(struct, schema, relname, 'FREELEN', stats[0]['free_space'])
+        else:
+            set_table_attribute(struct, schema, relname, 'HAS_STATISTICS', False)
 
         # Store the relation type
         set_table_attribute(struct, schema, relname, 'TYPE', table['reltype'])
 
         # Store table description
         set_table_attribute(struct, schema, relname, 'DESCRIPTION', table['table_description'])
-
-        # Store table manual declared dependencies
-        table_description = table['table_description']
-        if table_description is not None:
-            match = re.finditer(r'\\\w+', table_description)
-            for m in match:
-                keyword = m.group()
-                depends = dict()
-                affects = dict()
-                if keyword in ('\\depends', '\\affects'):
-                    mm = re.match(r'\\(?:depends|affects)\s+(\w+):\s*(?:(\w+)\.)?(\w+)', table_description[m.start():])
-                    if mm is not None:
-                        link_start = m.start() + mm.start()
-                        link_len = len(mm.group())
-                        declaration = table_description[link_start:link_start + link_len]
-                        func = set_table_depends if keyword == '\\depends' else set_table_affects
-                        target_type, target_schema, target_object = mm.groups()
-                        func(struct, schema, relname, declaration, target_type, target_schema, target_object)
-                    else:
-                        table_bar.message(
-                            'ERROR: unable to parse keyword arguments in the {}.{} description: {}'.format(
-                                schema, relname, table_description[m.start():]))
-                else:
-                    table_bar.message(
-                        'ERROR: unexpected keyword in the {}.{} description: {}'.format(schema, relname, keyword))
 
         # Store the view definition
         set_table_attribute(struct, schema, relname, 'VIEW_DEF', table['view_definition'])
@@ -899,7 +856,6 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
             comment = function['comment']
             functionargs = function['function_args']
             types = functionargs.split()
-            count = 0
 
             # Pre-setup argument names when available.
             argnames = function['function_arg_names']
@@ -923,38 +879,12 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
             assert len(function_arg) == 1
             ret_type = ret_type + function_arg[0]['type_name']
 
+            set_function_attribute(struct, schema, functionname, 'NAME', function['function_name'])
+            set_function_attribute(struct, schema, functionname, 'ARGS', parameters)
             set_function_attribute(struct, schema, functionname, 'COMMENT', comment)
             set_function_attribute(struct, schema, functionname, 'SOURCE', function['source_code'])
             set_function_attribute(struct, schema, functionname, 'LANGUAGE', function['language_name'])
             set_function_attribute(struct, schema, functionname, 'RETURNS', ret_type)
-
-            # Store function manual declared dependencies
-            if comment is not None:
-                match = re.finditer(r'\\\w+', comment)
-                for m in match:
-                    keyword = m.group()
-                    depends = dict()
-                    affects = dict()
-                    if keyword in ('\\depends', '\\affects'):
-                        mm = re.match(r'\\(?:depends|affects)\s+(\w+):\s*(?:(\w+)\.)?(\w+)',
-                                      comment[m.start():])
-                        if mm is not None:
-                            link_start = m.start() + mm.start()
-                            link_len = len(mm.group())
-                            declaration = comment[link_start:link_start + link_len]
-                            func = set_function_depends if keyword == '\\depends' else set_function_affects
-                            target_type, target_schema, target_object = mm.groups()
-                            func(struct, schema, functionname, declaration, target_type, target_schema, target_object)
-                        else:
-                            table_bar.message(
-                                'ERROR: unable to parse keyword arguments in the {}.{} description: {}'.format(
-                                    schema, functionname, comment[m.start():]))
-                    elif keyword == '\\param':
-                        pass  # do nothing
-                    else:
-                        table_bar.message(
-                            'ERROR: unexpected keyword in the {}.{} description: {}'.format(schema, functionname,
-                                                                                            keyword))
 
         function_bar.end()
 
@@ -968,6 +898,171 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
 
     cur.close()
 
+
+class CommentsParser:
+    def __init__(self, db):
+        self.db = db
+        self.tables = dict()
+        self.functions = dict()
+
+    def parse(self):
+        self.__collect_objects()
+        self.__parse_and_analyse_comments()
+
+    def __collect_objects(self):
+        for database in self.db:
+            db_tables = self.tables[database] = dict()
+            db_functions = self.functions[database] = dict()
+            schemas = self.db[database]['STRUCT']
+            for schema, schema_attr in schemas.items():
+                # .. tables
+                schema_tables = db_tables[schema] = set()
+                src_tables = schema_attr.get('TABLE', dict())
+                for table in src_tables:
+                    schema_tables.add(table)
+                # .. functions, keep only first (in alphabetical order) set of arguments
+                schema_functions = db_functions[schema] = dict()
+                src_functions = schema_attr.get('FUNCTION', dict())
+                for function in sorted(src_functions.keys(), reverse=True):
+                    schema_functions[src_functions[function]['NAME']] = function
+
+    def __parse_and_analyse_comments(self):
+        for database in self.db:
+            schemas = self.db[database]['STRUCT']
+            for schema, schema_attr in schemas.items():
+                # .. tables
+                tables = schema_attr.get('TABLE', dict())
+                for table, table_attr in tables.items():
+                    self.__postprocess_table_description(database, table_attr)
+                # .. functions
+                functions = schema_attr.get('FUNCTION', dict())
+                for function, function_attr in functions.items():
+                    self.__postprocess_function_comment(database, function_attr)
+
+    def __postprocess_table_description(self, database, table_attr: dict):
+        table_description = table_attr['DESCRIPTION']
+        if table_description is None:
+            return
+        match = re.finditer(r'\\\w+', table_description)
+        for m in match:
+            keyword = dict()
+            table_attr.setdefault('KEYWORDS', list()).append(keyword)
+            keyword['NAME'] = m.group()
+            keyword['POSITION'] = m.start()
+            keyword['LENGTH_WITH_ARGS'] = keyword['LENGTH'] = len(m.group())
+
+            if keyword['NAME'] in ('\\depends', '\\affects'):
+                elements = self.__parse_keyword_depends_or_affects(table_description, m.start())
+                if elements is not None:
+                    keyword['LENGTH_WITH_ARGS'], keyword['ARGS'] = elements
+                    error = self.__check_depends_or_affects_target_exists(database, keyword)
+                    if error is not None:
+                        keyword['ERROR'] = error
+                else:
+                    keyword['ERROR'] = 'ARGS_PARSE_ERROR'
+            else:
+                keyword['ERROR'] = 'UNEXPECTED_KEYWORD'
+
+    def __postprocess_function_comment(self, database, function_attr: dict):
+        comment = function_attr['COMMENT']
+        if comment is None:
+            return
+        match = re.finditer(r'\\\w+', comment)
+        for m in match:
+            keyword = dict()
+            function_attr.setdefault('KEYWORDS', list()).append(keyword)
+            keyword['NAME'] = m.group()
+            keyword['POSITION'] = m.start()
+            keyword['LENGTH_WITH_ARGS'] = keyword['LENGTH'] = len(m.group())
+
+            if keyword['NAME'] in ('\\depends', '\\affects'):
+                elements = self.__parse_keyword_depends_or_affects(comment, m.start())
+                if elements is not None:
+                    keyword['LENGTH_WITH_ARGS'], keyword['ARGS'] = elements
+                    error = self.__check_depends_or_affects_target_exists(database, keyword)
+                    if error is not None:
+                        keyword['ERROR'] = error
+                else:
+                    keyword['ERROR'] = 'ARGS_PARSE_ERROR'
+            elif keyword['NAME'] == '\\param':
+                elements = self.__parse_keyword_param(comment, m.start())
+                if elements is not None:
+                    keyword['LENGTH_WITH_ARGS'], keyword['ARGS'] = elements
+                else:
+                    keyword['ERROR'] = 'ARGS_PARSE_ERROR'
+            else:
+                keyword['ERROR'] = 'UNEXPECTED_KEYWORD'
+
+    def __check_depends_or_affects_target_exists(self, database, keyword):
+        args = keyword['ARGS']
+        target_object_type = args['OBJECT_TYPE']['VALUE']
+        target_schema = args['SCHEMA']['VALUE']
+        target_object = args['OBJECT']['VALUE']
+
+        target_schema_lc = target_schema.lower() if target_schema is not None else None
+        target_object_lc = target_object.lower()
+
+        schemas = self.db[database].get('STRUCT', dict())
+
+        if target_object_type in ('TABLE', 'VIEW', 'MATVIEW'):
+            if target_schema is None:
+                return 'SCHEMA_REQUIRED'
+            if target_schema_lc not in schemas:
+                return 'NO_SUCH_SCHEMA'
+            if target_object_lc not in self.tables[database].get(target_schema_lc, set()):
+                return 'NO_SUCH_TABLE_OR_VIEW'
+            target = schemas[target_schema_lc]['TABLE'][target_object_lc]
+            keyword['TARGET_TYPE'] = target['TYPE'].upper()
+            return None
+        elif target_object_type == 'FUNCTION':
+            if target_schema is None:
+                return 'SCHEMA_REQUIRED'
+            if target_schema_lc not in schemas:
+                return 'NO_SUCH_SCHEMA'
+            if target_object_lc not in self.functions[database].get(target_schema_lc, dict()):
+                return 'NO_SUCH_FUNCTION'
+            keyword['TARGET_TYPE'] = 'FUNCTION'
+            keyword['FUNCTION_WITH_ARGS'] = self.functions[database][target_schema_lc][target_object_lc]
+            return None
+        elif target_object_type in ('LAYER', 'SERVICE'):
+            keyword['TARGET_TYPE'] = target_object_type
+            return None
+        else:
+            return 'UNEXPECTED_OBJECT_TYPE'
+
+    def __arg_from_rx(self, keyword_start, match, group):
+        arg = dict()
+        arg['VALUE'] = match.group(group)
+        arg['POSITION'] = keyword_start + match.start(group)
+        arg['LENGTH'] = len(arg['VALUE']) if arg['VALUE'] is not None else 0
+        return arg
+
+    def __parse_keyword_depends_or_affects(self, comment, keyword_start):
+        mm = re.match(r'^\\(?:depends|affects)\s+(\w+):\s*(?:(\w+)\.)?(\w+)', comment[keyword_start:])
+        if mm is not None:
+            args = dict()
+            args['OBJECT_TYPE'] = self.__arg_from_rx(keyword_start, mm, 1)
+            args['SCHEMA'] = self.__arg_from_rx(keyword_start, mm, 2)
+            args['OBJECT'] = self.__arg_from_rx(keyword_start, mm, 3)
+            return len(mm.group()), args
+        else:
+            return None
+
+    def __parse_keyword_param(self, comment, keyword_start):
+        mm = re.match(r'^\\param\s+(\w+)', comment[keyword_start:])
+        if mm is not None:
+            args = dict()
+            args['PARAM_NAME'] = self.__arg_from_rx(keyword_start, mm, 1)
+            return len(mm.group()), args
+        else:
+            return None
+
+
+def info_postprocess(db):
+    print('postprocessing data')
+
+    comments_parser = CommentsParser(db)
+    comments_parser.parse()
 
 ######
 # sgml_safe_id
@@ -1157,17 +1252,130 @@ def sql_prettyprint(string):
     return result
 
 
+def make_comment_html(comment, is_function_comment: bool, keywords: list):
+    if comment is None:
+        return None
+    result = str()
+    comment_pos = 0
+    for keyword in keywords:
+        # .. add to result comment part before current keyword
+        keyword_pos = keyword['POSITION']
+        keyword_with_args_end = keyword_pos + keyword['LENGTH_WITH_ARGS']
+        if keyword_pos != comment_pos:
+            result += html(comment[comment_pos:keyword_pos])
+            comment_pos = keyword_pos
+        # .. insert error if exists
+        if 'ERROR' in keyword:
+            result += '<b><font color="red">[ERROR: {}] </font></b>'.format(keyword['ERROR'])
+            result += comment[keyword_pos:keyword_with_args_end]
+            comment_pos = keyword_with_args_end
+            continue
+        # .. \depends, \affects: insert hyperlink if exists
+        if keyword['NAME'] in ('\\depends', '\\affects'):
+            is_depends = keyword['NAME'] == '\\depends'
+            object_type = keyword['TARGET_TYPE']
+            schema_name = keyword['ARGS']['SCHEMA']['VALUE']
+            if schema_name:
+                schema_name = schema_name.lower()
+            object_name = keyword['ARGS']['OBJECT']['VALUE'].lower()
+            full_object_name = schema_name + '.' + object_name if schema_name else object_name
+            add_reference = False
+            if object_type == 'FOREIGN TABLE':
+                prefix = 'Зависит от внешней таблицы' if is_depends else 'Влияет на внешнюю таблицу'
+                add_reference = True
+            elif object_type == 'MATERIALIZED VIEW':
+                prefix = 'Зависит от материального представления' if is_depends else 'Влияет на материальное представление'
+                add_reference = True
+            elif object_type == 'SPECIAL':
+                prefix = 'Зависит от специальной таблицы' if is_depends else 'Влияет на специальную таблицу'
+                add_reference = True
+            elif object_type == 'TABLE':
+                prefix = 'Зависит от таблицы' if is_depends else 'Влияет на таблицу'
+                add_reference = True
+            elif object_type == 'VIEW':
+                prefix = 'Зависит от представления' if is_depends else 'Влияет на представление'
+                add_reference = True
+            elif object_type == 'FUNCTION':
+                prefix = 'Зависит от функции' if is_depends else 'Влияет на функцию'
+                object_name = keyword['FUNCTION_WITH_ARGS']
+                add_reference = True
+            elif object_type == 'LAYER':
+                prefix = 'Зависит от слоя' if is_depends else 'Влияет на слой'
+            elif object_type == 'SERVICE':
+                prefix = 'Зависит от сервиса' if is_depends else 'Влияет на сервис'
+            else:
+                raise RuntimeError('unexpected object type: {}'.format(object_type))
+            if add_reference:
+                reference = sgml_safe_id('.'.join((schema_name, object_type.lower(), object_name)))
+                html_target = '{} <a href=#{}>{}</a>'.format(prefix, reference, full_object_name)
+            else:
+                html_target = prefix + ' ' + full_object_name
+            result += html_target
+            comment_pos = keyword_with_args_end
+            continue
+        # .. \param (function only): bold param
+        if is_function_comment and keyword['NAME'] == '\\param':
+            html_target = 'Параметр: <b>{}</b>'.format(keyword['ARGS']['PARAM_NAME']['VALUE'])
+            result += html_target
+            comment_pos = keyword_with_args_end
+            continue
+
+        raise RuntimeError('unexpected keyword')
+
+    if comment_pos != len(comment):
+        result += html(comment[comment_pos:len(comment)])
+    return result
+
+
+def make_table_comment_html(comment: str, keywords: list):
+    return make_comment_html(comment, False, keywords)
+
+
+def make_function_comment_html(comment: str, keywords: list):
+    return make_comment_html(comment, True, keywords)
+
+
 #####
 # write_using_templates
 #
 # Generate structure that HTML::Template requires out of the
 # 'STRUCT' for table related information, and 'STRUCT' for
 # the schema and function information
-def write_using_templates(db, database, statistics, template_path, output_filename_base, wanted_output):
+def write_using_templates(db, database, template_path, output_filename_base, wanted_output):
     print('write using templates')
     struct = db[database]['STRUCT']
 
     schemas = list()
+
+    # Foreign Key Discovery
+    foreign_keys = dict()
+    for fk_schema in sorted(struct.keys()):
+        fk_schema_attr = struct[fk_schema]
+        for fk_table in sorted(fk_schema_attr['TABLE'] if 'TABLE' in fk_schema_attr else []):
+            fk_table_attr = fk_schema_attr['TABLE'][fk_table]
+            for fk_column in sorted(fk_table_attr['COLUMN'] if 'COLUMN' in fk_table_attr else []):
+                fk_column_attr = fk_table_attr['COLUMN'][fk_column]
+                for fk_con in sorted(fk_column_attr['CON'] if 'CON' in fk_column_attr else []):
+                    con_attr = fk_column_attr['CON'][fk_con]
+                    if con_attr['TYPE'] == 'FOREIGN KEY':
+                        table = con_attr['FKTABLE']
+                        schema = con_attr['FKSCHEMA']
+                        fksgmlid = sgml_safe_id('.'.join((fk_schema, fk_table_attr['TYPE'], fk_table)))
+                        table_foreign_keys = foreign_keys.setdefault(schema, dict()).setdefault(table, list())
+                        table_foreign_keys.append({
+                            'fk_column_number': fk_column_attr['ORDER'],
+                            'fk_sgmlid': fksgmlid,
+                            'fk_schema': fk_schema,
+                            'fk_schema_dbk': docbook(fk_schema),
+                            'fk_schema_dot': graphviz(fk_schema),
+                            'fk_table': fk_table,
+                            'fk_table_dbk': docbook(fk_table),
+                            'fk_table_dot': graphviz(fk_table),
+                        })
+
+                        # only have the count if there is more than 1 schema
+                        if len(struct) > 1:
+                            table_foreign_keys[-1]["number_of_schemas"] = len(struct)
 
     # Start at 0, increment to 1 prior to use.
     object_id = 0
@@ -1312,41 +1520,8 @@ def write_using_templates(db, database, statistics, template_path, output_filena
                         'parent_schema_dot': graphviz(inhSch),
                     })
 
-            # Foreign Key Discovery
-            #
-            # lastmatch is used to ensure that we only supply a result a
-            # single time and not once for each link found.  Since the
-            # loops are sorted, we only need to track the last element, and
-            # not all supplied elements.
-            fk_schemas = list()
-            lastmatch = tuple()
-            for fk_schema in sorted(struct.keys()):
-                fk_schema_attr = struct[fk_schema]
-                for fk_table in sorted(fk_schema_attr['TABLE'] if 'TABLE' in fk_schema_attr else []):
-                    fk_table_attr = fk_schema_attr['TABLE'][fk_table]
-                    for fk_column in sorted(fk_table_attr['COLUMN'] if 'COLUMN' in fk_table_attr else []):
-                        fk_column_attr = fk_table_attr['COLUMN'][fk_column]
-                        for fk_con in sorted(fk_column_attr['CON'] if 'CON' in fk_column_attr else []):
-                            con_attr = fk_column_attr['CON'][fk_con]
-                            if con_attr['TYPE'] == 'FOREIGN KEY' and con_attr['FKTABLE'] == table and con_attr[
-                                'FKSCHEMA'] == schema and lastmatch != (fk_schema, fk_table):
-                                fksgmlid = sgml_safe_id('.'.join((fk_schema, fk_table_attr['TYPE'], fk_table)))
-                                fk_schemas.append({
-                                    'fk_column_number': fk_column_attr['ORDER'],
-                                    'fk_sgmlid': fksgmlid,
-                                    'fk_schema': fk_schema,
-                                    'fk_schema_dbk': docbook(fk_schema),
-                                    'fk_schema_dot': graphviz(fk_schema),
-                                    'fk_table': fk_table,
-                                    'fk_table_dbk': docbook(fk_table),
-                                    'fk_table_dot': graphviz(fk_table),
-                                })
-
-                                # only have the count if there is more than 1 schema
-                                if len(struct) > 1:
-                                    fk_schemas[-1]["number_of_schemas"] = len(struct)
-
-                                lastmatch = (fk_schema, fk_table)
+            # Foreign Keys
+            table_foreign_keys = foreign_keys.get(schema, dict()).get(table, list())
 
             # List off permissions
             permissions = list()
@@ -1381,8 +1556,13 @@ def write_using_templates(db, database, statistics, template_path, output_filena
             if comment_dia:
                 comment_dia = re.sub('^(.{35}).{5,}(.{5})$', '\\1 ... \\2', comment_dia)
 
-            table_stat_attr = lambda name: table_attr[name] if name in table_attr else None
+            def table_stat_attr(name):
+                return table_attr[name] if name in table_attr else None
 
+            keywords = table_attr.get('KEYWORDS', list())
+            table_comment_html = make_table_comment_html(table_attr['DESCRIPTION'], keywords)
+
+            stats_enabled = table_stat_attr('HAS_STATISTICS')
             tables.append({
                 'object_id': object_id,
                 'object_id_dbk': docbook(object_id),
@@ -1393,17 +1573,7 @@ def write_using_templates(db, database, statistics, template_path, output_filena
                 'schema_sgmlid': sgml_safe_id(schema + '.schema'),
 
                 # Statistics
-                'stats_enabled': statistics,
-                'stats_dead_bytes': use_units(table_stat_attr('DEADTUPLELEN')),
-                'stats_dead_bytes_dbk': docbook(use_units(table_stat_attr('DEADTUPLELEN'))),
-                'stats_free_bytes': use_units(table_stat_attr('FREELEN')),
-                'stats_free_bytes_dbk': docbook(use_units(table_stat_attr('FREELEN'))),
-                'stats_table_bytes': use_units(table_stat_attr('TABLELEN')),
-                'stats_table_bytes_dbk': docbook(use_units(table_stat_attr('TABLELEN'))),
-                'stats_tuple_count': table_stat_attr('TUPLECOUNT'),
-                'stats_tuple_count_dbk': docbook(table_stat_attr('TUPLECOUNT')),
-                'stats_tuple_bytes': use_units(table_stat_attr('TUPLELEN')),
-                'stats_tuple_bytes_dbk': docbook(use_units(table_stat_attr('TUPLELEN'))),
+                'stats_enabled': stats_enabled,
 
                 'table': table,
                 'table_dbk': docbook(table),
@@ -1414,18 +1584,30 @@ def write_using_templates(db, database, statistics, template_path, output_filena
                 'table_comment': table_attr['DESCRIPTION'],
                 'table_comment_dbk': docbook(table_attr['DESCRIPTION']),
                 'table_comment_dia': comment_dia,
-                'table_comment_html': html(table_attr['DESCRIPTION']),
+                'table_comment_html': table_comment_html,
                 'view_definition': viewdef,
                 'view_definition_dbk': docbook(viewdef),
 
                 # lists
                 'columns': columns,
                 'constraints': constraints,
-                'fk_schemas': fk_schemas,
+                'fk_schemas': table_foreign_keys,
                 'indexes': indexes,
                 'inherits': inherits,
                 'permissions': permissions,
             })
+
+            if stats_enabled:
+                tables[-1]['stats_dead_bytes'] = use_units(table_stat_attr('DEADTUPLELEN'))
+                tables[-1]['stats_dead_bytes_dbk'] = docbook(use_units(table_stat_attr('DEADTUPLELEN')))
+                tables[-1]['stats_free_bytes'] = use_units(table_stat_attr('FREELEN'))
+                tables[-1]['stats_free_bytes_dbk'] = docbook(use_units(table_stat_attr('FREELEN')))
+                tables[-1]['stats_table_bytes'] = use_units(table_stat_attr('TABLELEN'))
+                tables[-1]['stats_table_bytes_dbk'] = docbook(use_units(table_stat_attr('TABLELEN')))
+                tables[-1]['stats_tuple_count'] = table_stat_attr('TUPLECOUNT')
+                tables[-1]['stats_tuple_count_dbk'] = docbook(table_stat_attr('TUPLECOUNT'))
+                tables[-1]['stats_tuple_bytes'] = use_units(table_stat_attr('TUPLELEN'))
+                tables[-1]['stats_tuple_bytes_dbk'] = docbook(use_units(table_stat_attr('TUPLELEN')))
 
             # only have the count if there is more than 1 schema
             if len(struct) > 1:
@@ -1435,13 +1617,15 @@ def write_using_templates(db, database, statistics, template_path, output_filena
         functions = list()
         for function in sorted(schema_attr['FUNCTION'].keys() if 'FUNCTION' in schema_attr else []):
             function_attr = schema_attr['FUNCTION'][function]
+            keywords = function_attr.get('KEYWORDS', list())
+            function_comment_html = make_function_comment_html(function_attr['COMMENT'], keywords)
             functions.append({
                 'function': function,
                 'function_dbk': docbook(function),
                 'function_sgmlid': sgml_safe_id('.'.join((schema, 'function', function))),
                 'function_comment': function_attr['COMMENT'],
                 'function_comment_dbk': docbook(function_attr['COMMENT']),
-                'function_comment_html': html(function_attr['COMMENT']),
+                'function_comment_html': function_comment_html,
                 'function_language': function_attr['LANGUAGE'].upper(),
                 'function_returns': function_attr['RETURNS'],
                 'function_source': function_attr['SOURCE'],
