@@ -1,9 +1,8 @@
 # command line arguments to run in sandbox:
 #   -d sandbox -u postgres --password 1 --statistics -t html
-#   --host 192.168.12.207 -p 5432 -d radar_db -u postgres --statistics --password=123 --library templates -m ^(?!radar_\d+).*$ -f output/radar_db
+#   --host 192.168.12.207 -p 5432 -d radar_db -u postgres --statistics --password=123 -f output/radar_db
 import argparse
 from datetime import datetime
-from decimal import Decimal
 from htmltmpl import TemplateManager, TemplateProcessor
 import json
 import os
@@ -11,24 +10,14 @@ import psycopg2
 import re
 import sys
 
+import collect_info
+
 
 def elided(text, left, right):
     mid = ' ... '
     if (left + len(mid) + right) < len(text):
         return text[:left] + mid + text[-right:]
     return text
-
-
-def fetchall_as_list_of_dict(cur):
-    result = list()
-    rows = cur.fetchall()
-    description = cur.description
-    for row in rows:
-        row_as_dict = dict()
-        for index, col in enumerate(description):
-            row_as_dict[col.name] = row[index]
-        result.append(row_as_dict)
-    return result
 
 
 def set_schema_comment(struct, schema, comment):
@@ -105,13 +94,6 @@ def set_function_attribute(struct, schema, function, name, value):
         setdefault(function, dict())[name] = value
 
 
-class PgJsonEncoder(json.JSONEncoder):
-    def default(self, o):
-        if isinstance(o, Decimal):
-            return float(o)
-        return super(PgJsonEncoder, self).default(o)
-
-
 class ProgressBar:
     def __init__(self, title, count):
         self.title = title
@@ -144,35 +126,23 @@ def main():
     db = dict()
 
     # The templates path
-    template_path = '/usr/local/share/postgresql_autodoc'
+    template_path = 'templates'
 
     # Setup the default connection variables based on the environment
     dbuser = os.getenv('PGUSER') or os.getenv('USER')
     database = os.getenv('PGDATABASE') or os.getenv('USER')
-    dbhost = os.getenv('PGHOST')
-    dbport = os.getenv('PGPORT')
+    dbhost = os.getenv('PGHOST') or 'localhost'
+    dbport = os.getenv('PGPORT') or 5432
 
     # Determine whether we need a password to connect
     needpass = 0
     dbpass = None
-    output_filename_base = database
 
-    # Tracking variables
-    dbisset = 0
-    fileisset = 0
-
-    only_schema = None
-    only_matching = None
-    table_out = None
     wanted_output = None  # means all types
     statistics = 0
 
-    # Fetch base and dirnames.  Useful for Usage()
-    dirname, basename = os.path.split(argv[0])
-
-    # If template_path isn't defined, lets set it ourselves
-    if template_path is None:
-        template_path = dirname
+    # Fetch base name
+    basename = os.path.split(argv[0])[1]
 
     parser = argparse.ArgumentParser(
         description='This is a utility which will run through PostgreSQL system tables and returns HTML, DOT, '
@@ -180,15 +150,15 @@ def main():
                     'project can be generated quickly and be automatically updatable, yet have a quite professional '
                     'look if you do some DSSSL/CSS work.')
     parser.add_argument('-d', metavar='<dbname>', type=str,
-                        help='Specify database name to connect to (default: {})'.format(database))
+                        help='Specify database name to connect to (default: $PGDATABASE or $USER)')
     parser.add_argument('-f', metavar='<file>', type=str,
-                        help='Specify output file prefix (default: {})'.format(database))
+                        help='Specify output file prefix (default: <dbname>)')
     parser.add_argument('--host', metavar='<host>', type=str,
-                        help='Specify database server host (default: localhost)')
+                        help='Specify database server host (default: $PGHOST or localhost)')
     parser.add_argument('-p', metavar='<port>', type=int,
-                        help='Specify database server port (default: 5432)')
+                        help='Specify database server port (default: $PGPORT or 5432)')
     parser.add_argument('-u', metavar='<username>', type=str,
-                        help='Specify database username (default: {})'.format(dbuser))
+                        help='Specify database username (default: $PGUSER or $USER)')
     parser.add_argument('--password', metavar='<pw>', type=str,
                         help='Specify database password (default: blank)')
     parser.add_argument('--prompt-password', action="store_true",
@@ -197,16 +167,13 @@ def main():
                         help='Path to the templates (default: {})'.format(template_path))
     parser.add_argument('-t', '--type', metavar='<output>', type=str,
                         help='Type of output wanted (default: All in template library)')
-    parser.add_argument('-s', '--schema', metavar='<schema>', type=str,
-                        help='Specify a specific schema to match. Technically this is a regular expression but '
-                             'anything other than a specific name may have unusual results')
-    parser.add_argument('-m', '--matching', metavar='<regexp>', type=str,
-                        help='Show only tables/objects with names matching the specified regular expression')
+    parser.add_argument('-c', '--config', metavar='<json>', type=str,
+                        help='Config file (default: input/<database>.json). Contains: '
+                             '1) whitelist and blacklist regular expressions for schemas; '
+                             '2)  whitelist and blacklist regular expressions '
+                             'for tables and functions of concrete schema if required')
     parser.add_argument('-w', action="store_true",
                         help='Use ~/.pgpass for authentication (overrides all other password options)')
-    parser.add_argument('--table', metavar='<args>', type=str,
-                        help='Tables to export. Multiple tables may be provided using a comma-separated list. I.e. '
-                             'table,table2,table3')
     parser.add_argument('--statistics', action="store_true",
                         help='In 7.4 and later, with the contrib module pgstattuple installed we can gather '
                              'statistics on the tables in the database (average size, free space, disk space used, '
@@ -217,17 +184,12 @@ def main():
     # Set the database
     if args.d is not None:
         database = args.d
-        dbisset = 1
-        if not fileisset:
-            output_filename_base = database
+    elif args.u is not None:
+        database = args.u
 
     # Set the user
     if args.u is not None:
         dbuser = args.u
-        if not dbisset:
-            database = dbuser
-            if not fileisset:
-                output_filename_base = database
 
     # Set the hostname
     if args.host is not None:
@@ -241,7 +203,7 @@ def main():
     if args.password is not None:
         dbpass = args.password
 
-    # Make sure we get a password before attempting to conenct
+    # Make sure we get a password before attempting to connect
     if args.prompt_password:
         needpass = 1
 
@@ -253,9 +215,9 @@ def main():
 
     # Set the base of the filename. The extensions pulled
     # from the templates will be appended to this name
+    output_filename_base = database
     if args.f is not None:
         output_filename_base = args.f
-        fileisset = 1
 
     # Set the template directory explicitly
     if args.library is not None:
@@ -265,22 +227,15 @@ def main():
     if args.type is not None:
         wanted_output = args.type
 
-    # User has requested a single schema dump and provided a pattern
-    if args.schema is not None:
-        only_schema = args.schema
-
-    # User has requested only tables/objects matching a pattern
-    if args.matching is not None:
-        only_matching = args.matching
-
-    # One might dump a table's set (comma-separated) or just one
-    # If dumping a set of specific tables do NOT dump out the functions
-    # in this database. Generates noise in the output
-    # that most likely isn't wanted. Check for $table_out around the
-    # function gathering location.
-    if args.table is not None:
-        tables_in = args.table.split(',')
-        table_out = ','.join(["'{}'".format(table) for table in tables_in])
+    # Read config file
+    config_json = os.path.join('input', database + '.json')
+    if args.config is not None:
+        config_json = args.config
+    with open(config_json) as config_json_file:
+        config_data = json.load(config_json_file)
+        schemas_whitelist_regex = config_data.get('schemas_whitelist_regex')
+        schemas_blacklist_regex = config_data.get('schemas_blacklist_regex')
+        schema_tweaks = config_data.get('schema_tweaks')
 
     # Check to see if Statistics have been requested
     if args.statistics:
@@ -299,23 +254,21 @@ def main():
         dbpass = input("Password: ")
 
     # Database Connection
-    dbhost = dbhost if dbhost is not None else 'localhost'
-    dbport = dbport if dbport is not None else 5432
     conn = psycopg2.connect(database=database, user=dbuser, password=dbpass, host=dbhost, port=dbport)
     conn.set_client_encoding('UTF8')
 
-    info_collect(conn, db, database, only_schema, only_matching, statistics, table_out)
+    info_collect(conn, db, database, schemas_whitelist_regex, schemas_blacklist_regex, schema_tweaks, statistics)
     conn.close()
 
     output_filename = output_filename_base + '.json'
     with open(output_filename, 'w') as outfile:
-        json.dump(db, outfile, indent=2, cls=PgJsonEncoder)
+        json.dump(db, outfile, indent=2, cls=collect_info.PgJsonEncoder)
 
     info_postprocess(db)
 
     output_filename = output_filename_base + '.postprocessed.json'
     with open(output_filename, 'w') as outfile:
-        json.dump(db, outfile, indent=2, cls=PgJsonEncoder)
+        json.dump(db, outfile, indent=2, cls=collect_info.PgJsonEncoder)
 
     # Write out *ALL* templates
     write_using_templates(db, database, template_path, output_filename_base, wanted_output)
@@ -325,295 +278,57 @@ def main():
 # info_collect
 #
 # Pull out all of the applicable information about a specific database
-def info_collect(conn, db, database, only_schema, only_matching, statistics, table_out):
+def info_collect(conn, db, database, schemas_whitelist_regex, schemas_blacklist_regex, schema_tweaks, statistics):
     print('collecting data')
+    if schemas_whitelist_regex is None:
+        schemas_whitelist_regex = '^'
+    if schemas_blacklist_regex is None:
+        schemas_blacklist_regex = '^'
+    if schema_tweaks is None:
+        schema_tweaks = dict()
+
     db[database] = dict()
     struct = db[database]['STRUCT'] = dict()
 
     # PostgreSQL's version is used to determine what queries are required
     # to retrieve a given information set.
-    if conn.server_version < 70300:
-        raise RuntimeError("PostgreSQL 7.3 and later are supported")
+    if conn.server_version < 70400:
+        raise RuntimeError("PostgreSQL 7.4 and later are supported")
 
     # Ensure we only retrieve information for the requested schemas.
     #
-    # system_schema         -> The primary system schema for a database.
-    #                       Public is used for versions prior to 7.3
+    # system_schema           -> The primary system schema for a database.
     #
-    # system_schema_list -> The list of schemas which we are not supposed
-    #                       to gather information for.
-    #                        TODO: Merge with system_schema in array form.
+    # schemas_whitelist_regex -> The list of schemas which we are supposed
+    #                            to gather information for, lower priority than blacklist
     #
-    # schemapattern      -> The schema the user provided as a command
-    #                       line option.
+    # schemas_blacklist_regex -> The list of schemas which we are not supposed
+    #                            to gather information for, higher priority than whitelist
+    #
+    # schema_tweaks           -> The individual schema tweaks:
+    #  .. tables_whitelist_regex     -> gather info if not None and table name matched regular expressions
+    #  .. tables_blacklist_regex:    -> gather info if not None and table name not matched regular expressions
+    #  .. functions_whitelist_regex: -> gather info if not None and function name matched regular expressions
+    #  .. functions_blacklist_regex: -> gather info if not None and function name not matched regular expressions
     system_schema = 'pg_catalog'
-    system_schema_list = 'pg_catalog|pg_toast|pg_temp_[0-9]+|information_schema'
-    schemapattern = '^' if only_schema is None else '^' + only_schema + '$'
-
-    # and only objects matching the specified pattern, if any
-    matchpattern = '' if only_matching is None else only_matching
-
-    #
-    # List of queries which are used to gather information from the
-    # database. The queries differ based on version but should
-    # provide similar output. At some point it should be safe to remove
-    # support for older database versions.
-    #
-
-    # Fetch the description of the database
-    sql_database = '''
-       SELECT pg_catalog.shobj_description(oid, 'pg_database') as comment
-         FROM pg_catalog.pg_database
-        WHERE datname = '{}';
-    '''.format(database)
-
-    # Pull out a list of tables, views and special structures.
-    sql_tables = '''
-       SELECT nspname as namespace
-            , relname as tablename
-            , pg_catalog.pg_get_userbyid(relowner) AS tableowner
-            , pg_class.oid
-            , pg_catalog.obj_description(pg_class.oid, 'pg_class') as table_description
-            , relacl
-            , CASE
-              WHEN relkind = 'f' THEN
-                'foreign table'
-              WHEN relkind = 'm' THEN
-                'materialized view'
-              WHEN relkind = 's' THEN
-                'special'
-              WHEN relkind = 'r' THEN
-                'table'
-              ELSE
-                'view'
-              END as reltype
-            , CASE
-              WHEN relkind IN ('m', 'v') THEN
-                pg_get_viewdef(pg_class.oid)
-              ELSE
-                NULL
-              END as view_definition
-         FROM pg_catalog.pg_class
-         JOIN pg_catalog.pg_namespace ON (relnamespace = pg_namespace.oid)
-        WHERE relkind IN ('f', 'm', 's', 'r', 'v')
-          AND relname ~ '{}'
-          AND nspname !~ '{}'
-          AND nspname ~ '{}' 
-    '''.format(matchpattern, system_schema_list, schemapattern)
-    if table_out is not None:
-        sql_tables = sql_tables + 'AND relname IN {}'.format(table_out)
-
-    # - uses pg_class.oid
-    sql_columns = '''
-       SELECT attname as column_name
-            , attlen as column_length
-            , CASE
-              WHEN pg_type.typname = 'int4'
-                   AND EXISTS (SELECT TRUE
-                                 FROM pg_catalog.pg_depend
-                                 JOIN pg_catalog.pg_class ON (pg_class.oid = objid)
-                                WHERE refobjsubid = attnum
-                                  AND refobjid = attrelid
-                                  AND relkind = 'S') THEN
-                'serial'
-              WHEN pg_type.typname = 'int8'
-                   AND EXISTS (SELECT TRUE
-                                 FROM pg_catalog.pg_depend
-                                 JOIN pg_catalog.pg_class ON (pg_class.oid = objid)
-                                WHERE refobjsubid = attnum
-                                  AND refobjid = attrelid
-                                  AND relkind = 'S') THEN
-                'bigserial'
-              ELSE
-                pg_catalog.format_type(atttypid, atttypmod)
-              END as column_type
-            , CASE
-              WHEN attnotnull THEN
-                cast('NOT NULL' as text)
-              ELSE
-                cast('' as text)
-              END as column_null
-            , CASE
-              WHEN pg_type.typname IN ('int4', 'int8')
-                   AND EXISTS (SELECT TRUE
-                                 FROM pg_catalog.pg_depend
-                                 JOIN pg_catalog.pg_class ON (pg_class.oid = objid)
-                                WHERE refobjsubid = attnum
-                                  AND refobjid = attrelid
-                                  AND relkind = 'S') THEN
-                NULL
-              ELSE
-                pg_get_expr(adbin, adrelid)
-              END as column_default
-            , pg_catalog.col_description(attrelid, attnum) as column_description
-            , attnum
-         FROM pg_catalog.pg_attribute 
-         JOIN pg_catalog.pg_type ON (pg_type.oid = atttypid) 
-    LEFT JOIN pg_catalog.pg_attrdef ON (   attrelid = adrelid 
-                                       AND attnum = adnum)
-        WHERE attnum > 0
-          AND attisdropped IS FALSE
-          AND attrelid = %(attrelid)s;
-    '''
-
-    sql_table_statistics = None
-    if statistics == 1:
-        if conn.server_version < 70400:
-            raise RuntimeError("Table statistics supported on PostgreSQL 7.4 and later.\n"
-                               "Remove --statistics flag and try again.")
-        sql_table_statistics = '''
-           SELECT table_len
-                , tuple_count
-                , tuple_len
-                , CAST(tuple_percent AS numeric(20,2)) AS tuple_percent
-                , dead_tuple_count
-                , dead_tuple_len
-                , CAST(dead_tuple_percent AS numeric(20,2)) AS dead_tuple_percent
-                , CAST(free_space AS numeric(20,2)) AS free_space
-                , CAST(free_percent AS numeric(20,2)) AS free_percent
-             FROM pgstattuple(CAST(%(table_oid)s AS oid));
-        '''
-
-    sql_indexes = '''
-       SELECT schemaname
-            , tablename
-            , indexname
-            , substring(    indexdef
-                       FROM position('(' IN indexdef) + 1
-                        FOR length(indexdef) - position('(' IN indexdef) - 1
-                       ) AS indexdef
-         FROM pg_catalog.pg_indexes
-        WHERE substring(indexdef FROM 8 FOR 6) != 'UNIQUE'
-          AND schemaname = %(schemaname)s
-          AND tablename = %(tablename)s;
-    '''
-
-    sql_inheritance = '''
-           SELECT parnsp.nspname AS par_schemaname
-            , parcla.relname AS par_tablename
-            , chlnsp.nspname AS chl_schemaname
-            , chlcla.relname AS chl_tablename
-         FROM pg_catalog.pg_inherits
-         JOIN pg_catalog.pg_class AS chlcla ON (chlcla.oid = inhrelid)
-         JOIN pg_catalog.pg_namespace AS chlnsp ON (chlnsp.oid = chlcla.relnamespace)
-         JOIN pg_catalog.pg_class AS parcla ON (parcla.oid = inhparent)
-         JOIN pg_catalog.pg_namespace AS parnsp ON (parnsp.oid = parcla.relnamespace)
-        WHERE chlnsp.nspname = %(child_schemaname)s
-          AND chlcla.relname = %(child_tablename)s
-          AND chlnsp.nspname ~ '{}'
-          AND parnsp.nspname ~ '{}';
-    '''.format(schemapattern, schemapattern)
-
-    # Fetch the list of PRIMARY and UNIQUE keys
-    sql_primary_keys = '''
-       SELECT conname AS constraint_name
-            , pg_catalog.pg_get_indexdef(d.objid) AS constraint_definition
-            , CASE
-              WHEN contype = 'p' THEN
-                'PRIMARY KEY'
-              ELSE
-                'UNIQUE'
-              END as constraint_type
-         FROM pg_catalog.pg_constraint AS c
-         JOIN pg_catalog.pg_depend AS d ON (d.refobjid = c.oid)
-        WHERE contype IN ('p', 'u')
-          AND deptype = 'i'
-          AND conrelid = %(conrelid)s;
-    '''
-
-    # FOREIGN KEY fetch
-    #
-    # Don't return the constraint name if it was automatically generated by
-    # PostgreSQL.  The $N (where N is an integer) is not a descriptive enough
-    # piece of information to be worth while including in the various outputs.
-    sql_foreign_keys = '''
-       SELECT pg_constraint.oid
-            , pg_namespace.nspname AS namespace
-            , CASE WHEN substring(pg_constraint.conname FROM 1 FOR 1) = '\\$' THEN ''
-              ELSE pg_constraint.conname
-              END AS constraint_name
-            , conkey AS constraint_key
-            , confkey AS constraint_fkey
-            , confrelid AS foreignrelid
-         FROM pg_catalog.pg_constraint
-         JOIN pg_catalog.pg_class ON (pg_class.oid = conrelid)
-         JOIN pg_catalog.pg_class AS pc ON (pc.oid = confrelid)
-         JOIN pg_catalog.pg_namespace ON (pg_class.relnamespace = pg_namespace.oid)
-         JOIN pg_catalog.pg_namespace AS pn ON (pn.oid = pc.relnamespace)
-        WHERE contype = 'f'
-          AND conrelid = %(conrelid)s
-          AND pg_namespace.nspname ~ '{}'
-          AND pn.nspname ~ '{}';
-    '''.format(schemapattern, schemapattern)
-
-    sql_foreign_key_arg = '''
-       SELECT attname AS attribute_name
-            , relname AS relation_name
-            , nspname AS namespace
-         FROM pg_catalog.pg_attribute
-         JOIN pg_catalog.pg_class ON (pg_class.oid = attrelid)
-         JOIN pg_catalog.pg_namespace ON (relnamespace = pg_namespace.oid)
-        WHERE attrelid = %(attrelid)s
-          AND attnum = %(attnum)s;
-    '''
-
-    # Fetch CHECK constraints
-    sql_constraint = '''
-       SELECT pg_get_constraintdef(oid) AS constraint_source
-            , conname AS constraint_name
-         FROM pg_constraint
-        WHERE conrelid = %(conrelid)s
-          AND contype = 'c';
-    '''
-
-    # Query for function information
-    sql_functions = '''
-       SELECT proname AS function_name
-            , nspname AS namespace
-            , lanname AS language_name
-            , pg_catalog.obj_description(pg_proc.oid, 'pg_proc') AS comment
-            , proargtypes AS function_args
-            , proargnames AS function_arg_names
-            , prosrc AS source_code
-            , proretset AS returns_set
-            , prorettype AS return_type
-         FROM pg_catalog.pg_proc
-         JOIN pg_catalog.pg_language ON (pg_language.oid = prolang)
-         JOIN pg_catalog.pg_namespace ON (pronamespace = pg_namespace.oid)
-         JOIN pg_catalog.pg_type ON (prorettype = pg_type.oid)
-        WHERE pg_namespace.nspname !~ '{}'
-          AND pg_namespace.nspname ~ '{}'
-          AND proname ~ '{}'
-          AND proname != 'plpgsql_call_handler';
-    '''.format(system_schema_list, schemapattern, matchpattern)
-
-    sql_function_arg = '''
-       SELECT nspname AS namespace
-            , replace( pg_catalog.format_type(pg_type.oid, typtypmod)
-                     , nspname ||'.'
-                     , '') AS type_name
-         FROM pg_catalog.pg_type
-         JOIN pg_catalog.pg_namespace ON (pg_namespace.oid = typnamespace)
-        WHERE pg_type.oid = %(type_oid)s;
-    '''
-
-    sql_schemas = '''
-       SELECT pg_catalog.obj_description(oid, 'pg_namespace') AS comment
-            , nspname as namespace
-         FROM pg_catalog.pg_namespace
-        WHERE pg_namespace.nspname !~ '{}'
-          AND pg_namespace.nspname ~ '{}';
-    '''.format(system_schema_list, schemapattern)
 
     cur = conn.cursor()
 
     # Fetch Database info
-    cur.execute(sql_database)
-    rows = fetchall_as_list_of_dict(cur)
-    if rows:
-        db[database]['COMMENT'] = rows[0]['comment']
+    db[database]['COMMENT'] = collect_info.get_database_description(cur, database)
+
+    # Fetch list of schemas
+    schemas = collect_info.get_schemas(cur, schemas_whitelist_regex, schemas_blacklist_regex)
 
     # Fetch tables and all things bound to tables
+    tables = list()
+    for schema in schemas:
+        tables_whitelist_regex = tables_blacklist_regex = None
+        if schema in schema_tweaks:
+            tables_whitelist_regex = schema_tweaks[schema].get('tables_whitelist_regex')
+            tables_blacklist_regex = schema_tweaks[schema].get('tables_blacklist_regex')
+        tables += collect_info.get_tables(cur, schema, tables_whitelist_regex, tables_blacklist_regex)
+
     permission_flag_to_str = {
         'a': 'INSERT',
         'r': 'SELECT',
@@ -623,8 +338,6 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
         'x': 'REFERENCES',
         't': 'TRIGGER',
     }
-    cur.execute(sql_tables)
-    tables = fetchall_as_list_of_dict(cur)
 
     table_bar = ProgressBar('tables:    ', len(tables))
     for (item_index, table) in enumerate(tables):
@@ -664,8 +377,7 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
 
         # Primitive Stats, but only if requested
         if statistics == 1 and table['reltype'] == 'table':
-            cur.execute(sql_table_statistics, {'table_oid': reloid, })
-            stats = fetchall_as_list_of_dict(cur)
+            stats = collect_info.get_statistics(cur, reloid)
             assert len(stats) == 1
             set_table_attribute(struct, schema, relname, 'HAS_STATISTICS', True)
             set_table_attribute(struct, schema, relname, 'TABLELEN', stats[0]['table_len'])
@@ -686,15 +398,13 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
         set_table_attribute(struct, schema, relname, 'VIEW_DEF', table['view_definition'])
 
         # Store constraints
-        cur.execute(sql_constraint, {'conrelid': reloid, })
-        constraints = fetchall_as_list_of_dict(cur)
+        constraints = collect_info.get_constraint(cur, reloid)
         for constraint in constraints:
             constraint_name = constraint['constraint_name']
             constraint_source = constraint['constraint_source']
             set_constraint(struct, schema, relname, constraint_name, constraint_source)
 
-        cur.execute(sql_columns, {'attrelid': reloid, })
-        columns = fetchall_as_list_of_dict(cur)
+        columns = collect_info.get_columns(cur, reloid)
         for column in columns:
             column_name = column['column_name']
             set_column_attribute(struct, schema, relname, column_name, 'ORDER', column['attnum'])
@@ -712,8 +422,7 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
         # number to the end of the the UNIQUE keyword which shows that they
         # are a part of a related definition.  I.e UNIQUE_1 goes with UNIQUE_1
         #
-        cur.execute(sql_primary_keys, {'conrelid': reloid, })
-        primary_keys = fetchall_as_list_of_dict(cur)
+        primary_keys = collect_info.get_primary_keys(cur, reloid)
         unqgroup = 0
         for pricols in primary_keys:
             index_type = pricols['constraint_type']
@@ -749,8 +458,7 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
         # FOREIGN KEYS like UNIQUE indexes can appear several times in
         # a table in multi-column format. We use the same trick to
         # record a numeric association to the foreign key reference.
-        cur.execute(sql_foreign_keys, {'conrelid': reloid, })
-        foreign_keys = fetchall_as_list_of_dict(cur)
+        foreign_keys = collect_info.get_foreign_keys(cur, reloid, schemas)
         fkgroup = 0
         for forcols in foreign_keys:
             column_oid = forcols['oid']
@@ -762,32 +470,14 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
             fschema = None
             ftable = None
 
-            fkey = forcols['constraint_fkey']
-            keys = forcols['constraint_key']
+            fkeyset = forcols['constraint_fkey']
+            keyset = forcols['constraint_key']
             frelid = forcols['foreignrelid']
-
-            # Since decent array support was not added until 7.4, and
-            # we want to support 7.3 as well, we parse the text version
-            # of the array by hand rather than combining this and
-            # Foreign_Key_Arg query into a single query.
-
-            fkeyset = list()
-            if isinstance(fkey, list):
-                fkeyset = fkey
-            else:  # DEPRECATED: DBD::Pg 1.49 and earlier
-                fkeyset = fkey.strip('{}').replace('"', '').split(',')
-
-            keyset = list()
-            if isinstance(keys, list):
-                keyset = keys
-            else:  # DEPRECATED: DBD::Pg 1.49 and earlier
-                keyset = keys.strip('{}').replace('"', '').split(',')
 
             # Convert the list of column numbers into column names for the
             # local side.
             for k in keyset:
-                cur.execute(sql_foreign_key_arg, {'attrelid': reloid, 'attnum': k})
-                foreign_key_arg = fetchall_as_list_of_dict(cur)
+                foreign_key_arg = collect_info.get_foreign_key_arg(cur, reloid, k)
                 assert len(foreign_key_arg) == 1
                 keylist.append(foreign_key_arg[0]['attribute_name'])
 
@@ -795,8 +485,7 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
             # for the referenced side. Grab the table and namespace
             # while we're here.
             for k in fkeyset:
-                cur.execute(sql_foreign_key_arg, {'attrelid': frelid, 'attnum': k})
-                foreign_key_arg = fetchall_as_list_of_dict(cur)
+                foreign_key_arg = collect_info.get_foreign_key_arg(cur, frelid, k)
                 assert len(foreign_key_arg) == 1
                 fkeylist.append(foreign_key_arg[0]['attribute_name'])
                 fschema = foreign_key_arg[0]['namespace']
@@ -828,16 +517,14 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
                     set_column_constraint_attribute(struct, schema, relname, column, con, 'KEYGROUP', fkgroup)
 
         # Pull out index information
-        cur.execute(sql_indexes, {'schemaname': schema, 'tablename': relname})
-        indexes = fetchall_as_list_of_dict(cur)
+        indexes = collect_info.get_indexes(cur, schema, relname)
         for idx in indexes:
             index_name = idx['indexname']
             index_definition = idx['indexdef']
             set_index_definition(struct, schema, relname, index_name, index_definition)
 
         # Extract Inheritance information
-        cur.execute(sql_inheritance, {'child_schemaname': schema, 'child_tablename': relname})
-        inheritance = fetchall_as_list_of_dict(cur)
+        inheritance = collect_info.get_inheritance(cur, schema, relname, schemas)
         for inherit in inheritance:
             parent_schemaname = inherit['par_schemaname']
             parent_tablename = inherit['par_tablename']
@@ -846,54 +533,56 @@ def info_collect(conn, db, database, only_schema, only_matching, statistics, tab
     table_bar.end()
 
     # Function Handling
-    if table_out is None:
-        cur.execute(sql_functions)
-        functions = fetchall_as_list_of_dict(cur)
-        function_bar = ProgressBar('functions: ', len(functions))
-        for function_index, function in enumerate(functions):
-            function_bar.begin_step(function['function_name'])
-            schema = function['namespace']
-            comment = function['comment']
-            functionargs = function['function_args']
-            types = functionargs.split()
+    functions = list()
+    for schema in schemas:
+        functions_whitelist_regex = functions_blacklist_regex = None
+        if schema in schema_tweaks:
+            functions_whitelist_regex = schema_tweaks[schema].get('functions_whitelist_regex')
+            functions_blacklist_regex = schema_tweaks[schema].get('functions_blacklist_regex')
+        functions += collect_info.get_functions(cur, schema, functions_whitelist_regex, functions_blacklist_regex)
 
-            # Pre-setup argument names when available.
-            argnames = function['function_arg_names']
+    function_bar = ProgressBar('functions: ', len(functions))
+    for function_index, function in enumerate(functions):
+        function_bar.begin_step(function['function_name'])
+        schema = function['namespace']
+        comment = function['comment']
+        functionargs = function['function_args']
+        types = functionargs.split()
 
-            # Setup full argument types including the parameter name
-            parameters = list()
-            for type_oid in types:
-                cur.execute(sql_function_arg, {'type_oid': type_oid, })
-                function_arg = fetchall_as_list_of_dict(cur)
-                assert len(function_arg) == 1
-                parameter = argnames.pop(0) + ' ' if argnames else ''
-                if function_arg[0]['namespace'] != system_schema:
-                    parameter = parameter + function_arg[0]['namespace'] + '.'
-                parameter = parameter + function_arg[0]['type_name']
-                parameters.append(parameter)
-            functionname = '{}({})'.format(function['function_name'], ', '.join(parameters))
+        # Pre-setup argument names when available.
+        argnames = function['function_arg_names']
 
-            ret_type = 'SET OF ' if function['returns_set'] else ''
-            cur.execute(sql_function_arg, {'type_oid': function['return_type']})
-            function_arg = fetchall_as_list_of_dict(cur)
+        # Setup full argument types including the parameter name
+        parameters = list()
+        for type_oid in types:
+            function_arg = collect_info.get_function_arg(cur, type_oid)
             assert len(function_arg) == 1
-            ret_type = ret_type + function_arg[0]['type_name']
+            parameter = argnames.pop(0) + ' ' if argnames else ''
+            if function_arg[0]['namespace'] != system_schema:
+                parameter = parameter + function_arg[0]['namespace'] + '.'
+            parameter = parameter + function_arg[0]['type_name']
+            parameters.append(parameter)
+        functionname = '{}({})'.format(function['function_name'], ', '.join(parameters))
 
-            set_function_attribute(struct, schema, functionname, 'NAME', function['function_name'])
-            set_function_attribute(struct, schema, functionname, 'ARGS', parameters)
-            set_function_attribute(struct, schema, functionname, 'COMMENT', comment)
-            set_function_attribute(struct, schema, functionname, 'SOURCE', function['source_code'])
-            set_function_attribute(struct, schema, functionname, 'LANGUAGE', function['language_name'])
-            set_function_attribute(struct, schema, functionname, 'RETURNS', ret_type)
+        ret_type = 'SET OF ' if function['returns_set'] else ''
+        function_arg = collect_info.get_function_arg(cur, function['return_type'])
+        assert len(function_arg) == 1
+        ret_type = ret_type + function_arg[0]['type_name']
 
-        function_bar.end()
+        set_function_attribute(struct, schema, functionname, 'NAME', function['function_name'])
+        set_function_attribute(struct, schema, functionname, 'ARGS', parameters)
+        set_function_attribute(struct, schema, functionname, 'COMMENT', comment)
+        set_function_attribute(struct, schema, functionname, 'SOURCE', function['source_code'])
+        set_function_attribute(struct, schema, functionname, 'LANGUAGE', function['language_name'])
+        set_function_attribute(struct, schema, functionname, 'RETURNS', ret_type)
+
+    function_bar.end()
 
     # Deal with the Schema
-    cur.execute(sql_schemas)
-    schemas = fetchall_as_list_of_dict(cur)
-    for schema in schemas:
-        comment = schema['comment']
-        namespace = schema['namespace']
+    schema_comments = collect_info.get_schemas_comment(cur, schemas)
+    for schema_comment in schema_comments:
+        comment = schema_comment['comment']
+        namespace = schema_comment['namespace']
         set_schema_comment(struct, namespace, comment)
 
     cur.close()
@@ -1063,6 +752,7 @@ def info_postprocess(db):
 
     comments_parser = CommentsParser(db)
     comments_parser.parse()
+
 
 ######
 # sgml_safe_id

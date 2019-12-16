@@ -1,0 +1,8 @@
+/output
+/templates/*.tmplc
+
+# PyCharm staff
+/.idea
+/__pycache__
+/venv
+

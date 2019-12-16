@@ -1,0 +1,22 @@
+{
+  "schemas_whitelist_regex": null,
+  "schemas_blacklist_regex": "^(pg_catalog|pg_toast|pg_toast_temp_[0-9]+|pg_temp_[0-9]+|information_schema)$",
+  "schema_tweaks": {
+    "public": {
+      "tables_whitelist_regex": null,
+      "tables_blacklist_regex": "^",
+      "functions_whitelist_regex": [
+        "^(get_fltime_and_routes|get_full_formular|get_full_formular_tz|get_plan_id|get_plan_id_2|get_proj4_from_srid|",
+        "get_radar_id|get_radar_id_2|get_tlg_txt|get_tlg_txt_json|getairwaywkt|getpositionfir|getstarttp|gettrack|",
+        "fill_routes_atc_by_radar_named_points|find_named_point_id)$"
+      ],
+      "functions_blacklist_regex": null
+    },
+    "radar": {
+      "tables_whitelist_regex": null,
+      "tables_blacklist_regex": "^(radar_\\d+)$",
+      "functions_whitelist_regex": null,
+      "functions_blacklist_regex": null
+    }
+  }
+}
