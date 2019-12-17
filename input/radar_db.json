@@ -38,5 +38,8 @@
       "closed_route_segments_line": ["closed_route_segments_line", "aixm"],
       "fir_points": ["fir_points", "aixm"]
     }
+  },
+  "services": {
+    "сервис_запроса_формуляров": "localhost:1234"
   }
 }

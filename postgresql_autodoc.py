@@ -243,6 +243,7 @@ def main():
         schemas_blacklist_regex = config_data.get('schemas_blacklist_regex')
         schema_tweaks = config_data.get('schema_tweaks')
         layers = config_data.get('layers')
+        services = config_data.get('services', dict())
 
     layers_url = dict()
     if layers:
@@ -256,6 +257,10 @@ def main():
                 layer_url += ('?' if first_arg else '&') + name + '=' + value
                 first_arg = False
             layers_url[layer.lower()] = {"name": layer, "url": layer_url}
+
+    services_url = dict()
+    for service_name, service_url in services.items():
+        services_url[service_name.lower()] = {"name": service_name, "url": service_url}
 
     # Check to see if Statistics have been requested
     if args.statistics:
@@ -284,7 +289,7 @@ def main():
     with open(output_filename, 'w') as outfile:
         json.dump(db, outfile, indent=2, cls=collect_info.PgJsonEncoder)
 
-    info_postprocess(db, layers_url)
+    info_postprocess(db, layers_url, services_url)
 
     output_filename = output_filename_base + '.postprocessed.json'
     with open(output_filename, 'w') as outfile:
@@ -609,9 +614,10 @@ def info_collect(conn, db, database, schemas_whitelist_regex, schemas_blacklist_
 
 
 class CommentsParser:
-    def __init__(self, db, layers_url):
+    def __init__(self, db, layers_url, services_url):
         self.db = db
         self.layers_url = layers_url
+        self.services_url = services_url
         self.tables = dict()
         self.functions = dict()
 
@@ -742,7 +748,11 @@ class CommentsParser:
             keyword['LAYER_URL'] = self.layers_url[target_object_lc]['url']
             return None
         elif target_object_type == 'SERVICE':
+            if target_object_lc not in self.services_url:
+                return 'NO_SUCH_SERVICE'
             keyword['TARGET_TYPE'] = 'SERVICE'
+            keyword['SERVICE_NAME'] = self.services_url[target_object_lc]['name']
+            keyword['SERVICE_URL'] = self.services_url[target_object_lc]['url']
             return None
         else:
             return 'UNEXPECTED_OBJECT_TYPE'
@@ -775,10 +785,10 @@ class CommentsParser:
             return None
 
 
-def info_postprocess(db, layers_url):
+def info_postprocess(db, layers_url, services_url):
     print('postprocessing data')
 
-    comments_parser = CommentsParser(db, layers_url)
+    comments_parser = CommentsParser(db, layers_url, services_url)
     comments_parser.parse()
 
 
@@ -1025,6 +1035,8 @@ def make_comment_html(comment, is_function_comment: bool, keywords: list):
                 outer_reference = keyword['LAYER_URL']
             elif object_type == 'SERVICE':
                 prefix = 'Зависит от сервиса' if is_depends else 'Влияет на сервис'
+                full_object_name = keyword['SERVICE_NAME']
+                outer_reference = keyword['SERVICE_URL']
             else:
                 raise RuntimeError('unexpected object type: {}'.format(object_type))
             if add_inner_reference:
