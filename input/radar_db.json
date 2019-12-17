@@ -18,5 +18,25 @@
       "functions_whitelist_regex": null,
       "functions_blacklist_regex": null
     }
+  },
+  "layers": {
+    "url": "http://192.168.12.229:8080/geoserver/web/wicket/bookmarkable/org.geoserver.web.data.resource.ResourceConfigurationPage",
+    "arguments_names": ["name", "wsName"],
+    "arguments_values": {
+      "ani_plans_points_": ["ANI_plans_points", "radar"],
+      "ani_working_restrictions": ["ANI_WORKING_RESTRICTIONS", "aixm"],
+      "ani_devel_restrictions": ["ANI_DEVEL_RESTRICTIONS", "aixm"],
+      "axm_airports": ["axm_airports", "aixm"],
+      "axm_airspaces": ["axm_airspaces", "aixm"],
+      "axm_navaid_equip": ["axm_navaid_equip", "aixm"],
+      "axm_obstacles": ["axm_obstacles", "aixm"],
+      "axm_route_point": ["axm_route_point", "aixm"],
+      "axm_route_segments_label": ["axm_route_segments_label", "aixm"],
+      "axm_route_segments_line": ["axm_route_segments_line", "aixm"],
+      "closed_airports": ["closed_airports", "aixm"],
+      "closed_navaid_equip": ["closed_navaid_equip", "aixm"],
+      "closed_route_segments_line": ["closed_route_segments_line", "aixm"],
+      "fir_points": ["fir_points", "aixm"]
+    }
   }
 }

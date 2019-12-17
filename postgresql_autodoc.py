@@ -1,6 +1,12 @@
 # command line arguments to run in sandbox:
 #   -d sandbox -u postgres --password 1 --statistics -t html
 #   --host 192.168.12.207 -p 5432 -d radar_db -u postgres --statistics --password=123 -f output/radar_db
+#
+# profiling:
+#   - interpreter options to enable profiling: -B -m cProfile -o output.prof
+#   - pip install snakeviz
+#   - snakeviz output.prof
+
 import argparse
 from datetime import datetime
 from htmltmpl import TemplateManager, TemplateProcessor
@@ -236,6 +242,20 @@ def main():
         schemas_whitelist_regex = config_data.get('schemas_whitelist_regex')
         schemas_blacklist_regex = config_data.get('schemas_blacklist_regex')
         schema_tweaks = config_data.get('schema_tweaks')
+        layers = config_data.get('layers')
+
+    layers_url = dict()
+    if layers:
+        url = layers.get("url", "")
+        arguments_names = layers.get("arguments_names", list())
+        arguments_values = layers.get("arguments_values", dict())
+        for layer, layer_arguments_values in arguments_values.items():
+            layer_url = url
+            first_arg = True
+            for name, value in zip(arguments_names, layer_arguments_values):
+                layer_url += ('?' if first_arg else '&') + name + '=' + value
+                first_arg = False
+            layers_url[layer.lower()] = {"name": layer, "url": layer_url}
 
     # Check to see if Statistics have been requested
     if args.statistics:
@@ -264,7 +284,7 @@ def main():
     with open(output_filename, 'w') as outfile:
         json.dump(db, outfile, indent=2, cls=collect_info.PgJsonEncoder)
 
-    info_postprocess(db)
+    info_postprocess(db, layers_url)
 
     output_filename = output_filename_base + '.postprocessed.json'
     with open(output_filename, 'w') as outfile:
@@ -589,8 +609,9 @@ def info_collect(conn, db, database, schemas_whitelist_regex, schemas_blacklist_
 
 
 class CommentsParser:
-    def __init__(self, db):
+    def __init__(self, db, layers_url):
         self.db = db
+        self.layers_url = layers_url
         self.tables = dict()
         self.functions = dict()
 
@@ -713,8 +734,15 @@ class CommentsParser:
             keyword['TARGET_TYPE'] = 'FUNCTION'
             keyword['FUNCTION_WITH_ARGS'] = self.functions[database][target_schema_lc][target_object_lc]
             return None
-        elif target_object_type in ('LAYER', 'SERVICE'):
-            keyword['TARGET_TYPE'] = target_object_type
+        elif target_object_type == 'LAYER':
+            if target_object_lc not in self.layers_url:
+                return 'NO_SUCH_LAYER'
+            keyword['TARGET_TYPE'] = 'LAYER'
+            keyword['LAYER_NAME'] = self.layers_url[target_object_lc]['name']
+            keyword['LAYER_URL'] = self.layers_url[target_object_lc]['url']
+            return None
+        elif target_object_type == 'SERVICE':
+            keyword['TARGET_TYPE'] = 'SERVICE'
             return None
         else:
             return 'UNEXPECTED_OBJECT_TYPE'
@@ -747,10 +775,10 @@ class CommentsParser:
             return None
 
 
-def info_postprocess(db):
+def info_postprocess(db, layers_url):
     print('postprocessing data')
 
-    comments_parser = CommentsParser(db)
+    comments_parser = CommentsParser(db, layers_url)
     comments_parser.parse()
 
 
@@ -969,35 +997,41 @@ def make_comment_html(comment, is_function_comment: bool, keywords: list):
                 schema_name = schema_name.lower()
             object_name = keyword['ARGS']['OBJECT']['VALUE'].lower()
             full_object_name = schema_name + '.' + object_name if schema_name else object_name
-            add_reference = False
+
+            add_inner_reference = False
+            outer_reference = None
             if object_type == 'FOREIGN TABLE':
                 prefix = 'Зависит от внешней таблицы' if is_depends else 'Влияет на внешнюю таблицу'
-                add_reference = True
+                add_inner_reference = True
             elif object_type == 'MATERIALIZED VIEW':
                 prefix = 'Зависит от материального представления' if is_depends else 'Влияет на материальное представление'
-                add_reference = True
+                add_inner_reference = True
             elif object_type == 'SPECIAL':
                 prefix = 'Зависит от специальной таблицы' if is_depends else 'Влияет на специальную таблицу'
-                add_reference = True
+                add_inner_reference = True
             elif object_type == 'TABLE':
                 prefix = 'Зависит от таблицы' if is_depends else 'Влияет на таблицу'
-                add_reference = True
+                add_inner_reference = True
             elif object_type == 'VIEW':
                 prefix = 'Зависит от представления' if is_depends else 'Влияет на представление'
-                add_reference = True
+                add_inner_reference = True
             elif object_type == 'FUNCTION':
                 prefix = 'Зависит от функции' if is_depends else 'Влияет на функцию'
                 object_name = keyword['FUNCTION_WITH_ARGS']
-                add_reference = True
+                add_inner_reference = True
             elif object_type == 'LAYER':
                 prefix = 'Зависит от слоя' if is_depends else 'Влияет на слой'
+                full_object_name = keyword['LAYER_NAME']
+                outer_reference = keyword['LAYER_URL']
             elif object_type == 'SERVICE':
                 prefix = 'Зависит от сервиса' if is_depends else 'Влияет на сервис'
             else:
                 raise RuntimeError('unexpected object type: {}'.format(object_type))
-            if add_reference:
-                reference = sgml_safe_id('.'.join((schema_name, object_type.lower(), object_name)))
-                html_target = '{} <a href=#{}>{}</a>'.format(prefix, reference, full_object_name)
+            if add_inner_reference:
+                inner_reference = sgml_safe_id('.'.join((schema_name, object_type.lower(), object_name)))
+                html_target = '{} <a href=#{}>{}</a>'.format(prefix, inner_reference, full_object_name)
+            elif outer_reference:
+                html_target = '{} <a href={}>{}</a>'.format(prefix, outer_reference, full_object_name)
             else:
                 html_target = prefix + ' ' + full_object_name
             result += html_target
@@ -1087,7 +1121,7 @@ def write_using_templates(db, database, template_path, output_filename_base, wan
                 # Have a shorter default for places that require it
                 shortdefault = column_attr['DEFAULT']
                 if shortdefault:
-                    shortdefault = re.sub('^(.{17}).{5,}(.{5})$', '\\1 ... \\2', shortdefault)
+                    shortdefault = elided(shortdefault, 17, 5)
 
                 # Deal with column constraints
                 colconstraints = list()
@@ -1161,7 +1195,7 @@ def write_using_templates(db, database, template_path, output_filename_base, wan
             constraints = list()
             for constraint in sorted(table_attr['CONSTRAINT'].keys() if 'CONSTRAINT' in table_attr else []):
                 shortcon = table_attr['CONSTRAINT'][constraint]
-                shortcon = re.sub('^(.{30}).{5,}(.{5})$', '\\1 ... \\2', shortcon)
+                shortcon = elided(shortcon, 30, 5)
                 constraints.append({
                     'constraint': table_attr['CONSTRAINT'][constraint],
                     'constraint_dbk': docbook(table_attr['CONSTRAINT'][constraint]),
@@ -1244,7 +1278,7 @@ def write_using_templates(db, database, template_path, output_filename_base, wan
             # Truncate comment for Dia
             comment_dia = table_attr['DESCRIPTION']
             if comment_dia:
-                comment_dia = re.sub('^(.{35}).{5,}(.{5})$', '\\1 ... \\2', comment_dia)
+                comment_dia = elided(comment_dia, 35, 5)
 
             def table_stat_attr(name):
                 return table_attr[name] if name in table_attr else None
