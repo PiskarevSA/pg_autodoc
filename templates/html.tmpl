@@ -117,8 +117,11 @@
 <ul>
   <!-- TMPL_LOOP name="schemas" -->
   <li><a name="<!-- TMPL_VAR ESCAPE="HTML" name="schema_sgmlid" -->"><!-- TMPL_VAR ESCAPE="HTML" name="schema" --></a></li><ul>
+    <details>
+    <summary>Содержимое схемы</summary>
     <!-- TMPL_LOOP name="tables" --><li><a href="#<!-- TMPL_VAR ESCAPE="URL" name="table_sgmlid" -->"><!-- TMPL_VAR ESCAPE="HTML" name="table" --></a></li><!-- /TMPL_LOOP name="tables" -->
     <!-- TMPL_LOOP name="functions" --><li><a href="#<!-- TMPL_VAR ESCAPE="URL" name="function_sgmlid" -->"><!-- TMPL_VAR ESCAPE="HTML" name="function" --></a></li><!-- /TMPL_LOOP name="functions" -->
+    </details>
   </ul>
   <!-- /TMPL_LOOP name="schemas" -->
 </ul>
@@ -254,7 +257,10 @@
 </ul>
 <!-- View Definition -->
 <!-- TMPL_IF name="view_definition" -->
+<details>
+<summary>Исходный код представления</summary>
 <pre><!-- TMPL_VAR ESCAPE="HTML" name="view_definition" --></pre>
+</details>
 <!-- /TMPL_IF name="view_definition" -->
 
 <!-- List off permissions -->
@@ -302,7 +308,10 @@
 <h3>Returns: <!-- TMPL_VAR ESCAPE="HTML" name="function_returns" --></h3>
 <h3>Language: <!-- TMPL_VAR ESCAPE="HTML" name="function_language" --></h3>
 <!-- TMPL_IF name="function_comment_html" --><p><!-- TMPL_VAR ESCAPE="NONE" name="function_comment_html" --></p><!-- /TMPL_IF name="function_comment_html" -->
+<details>
+<summary>Исходный код функции</summary>
 <pre><!-- TMPL_IF name="function_source" --><!-- TMPL_VAR ESCAPE="HTML" name="function_source" --><!-- /TMPL_IF name="function_source" --></pre>
+</details>
 <!-- /TMPL_LOOP name="functions" -->
 
 <!-- /TMPL_LOOP name="schemas" -->
