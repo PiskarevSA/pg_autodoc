@@ -1,6 +1,6 @@
 {
   "schemas_whitelist_regex": null,
-  "schemas_blacklist_regex": "^(pg_catalog|pg_toast|pg_toast_temp_[0-9]+|pg_temp_[0-9]+|information_schema)$",
+  "schemas_blacklist_regex": "^(pg_catalog|pg_toast|pg_toast_temp_[0-9]+|pg_temp_[0-9]+|information_schema|tiger.*|topology)$",
   "schema_tweaks": {
     "public": {
       "tables_whitelist_regex": null,

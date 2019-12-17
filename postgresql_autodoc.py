@@ -1,6 +1,6 @@
 # command line arguments to run in sandbox:
 #   -d sandbox -u postgres --password 1 --statistics -t html
-#   --host 192.168.12.207 -p 5432 -d radar_db -u postgres --statistics --password=123 -f output/radar_db
+#   --host 192.168.12.208 -p 5432 -d radar_db -u postgres --statistics --password=123 -f output/radar_db
 #
 # profiling:
 #   - interpreter options to enable profiling: -B -m cProfile -o output.prof
