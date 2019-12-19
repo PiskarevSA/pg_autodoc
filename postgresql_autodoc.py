@@ -1569,7 +1569,7 @@ def write_using_templates(db, database, template_path, output_filename_base, wan
     def make_html_dependencies(dependencies, root=None):
         if not dependencies:
             return None
-        template_lookup = mako.lookup.TemplateLookup(directories=['templates'])
+        template_lookup = mako.lookup.TemplateLookup(directories=['templates'], input_encoding='utf-8')
         template = template_lookup.get_template('make_html_dependencies.mako')
         return template.render(dependencies=dependencies)
 
