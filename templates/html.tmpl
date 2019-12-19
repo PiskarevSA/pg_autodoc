@@ -126,6 +126,11 @@
   <!-- /TMPL_LOOP name="schemas" -->
 </ul>
 
+<!-- TMPL_IF name="dependencies" -->
+<h1>Layers and services dependencies</h1>
+<!-- TMPL_VAR ESCAPE="NONE" name="dependencies" -->
+<!-- /TMPL_IF name="dependencies" -->
+
 <!-- Schema Creation -->
 <!-- TMPL_LOOP name="schemas" --><!-- <!-- TMPL_VAR ESCAPE="HTML" name="schema" --><!-- TMPL_VAR ESCAPE="HTML" name="schema" --> -->
 

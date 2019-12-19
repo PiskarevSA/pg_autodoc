@@ -23,7 +23,7 @@
     "url": "http://192.168.12.229:8080/geoserver/web/wicket/bookmarkable/org.geoserver.web.data.resource.ResourceConfigurationPage",
     "arguments_names": ["name", "wsName"],
     "arguments_values": {
-      "ani_plans_points_": ["ANI_plans_points", "radar"],
+      "ani_plans_points": ["ANI_plans_points", "radar"],
       "ani_working_restrictions": ["ANI_WORKING_RESTRICTIONS", "aixm"],
       "ani_devel_restrictions": ["ANI_DEVEL_RESTRICTIONS", "aixm"],
       "axm_airports": ["axm_airports", "aixm"],

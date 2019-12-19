@@ -15,6 +15,8 @@ import os
 import psycopg2
 import re
 import sys
+import mako.template
+import mako.lookup
 
 import collect_info
 
@@ -785,11 +787,95 @@ class CommentsParser:
             return None
 
 
+class DependendenciesInvestigator():
+    def __init__(self, db):
+        self.db = db
+
+    def investigate(self):
+        for database in self.db:
+            schemas = self.db[database]['STRUCT']
+            dependencies = list()
+            for schema, schema_attr in schemas.items():
+                # .. tables
+                tables = schema_attr.get('TABLE', dict())
+                for tablename, table in tables.items():
+                    self.__analyse_keywords(table['TYPE'], schema, tablename, table.get('KEYWORDS', list()), dependencies)
+                # .. functions
+                functions = schema_attr.get('FUNCTION', dict())
+                for functionname, function in functions.items():
+                    self.__analyse_keywords('FUNCTION', schema, functionname, function.get('KEYWORDS', list()), dependencies)
+            tree_root_node = self.db[database]['DEPENDENCIES'] = dict()
+            self.__build_tree(dependencies, tree_root_node, lambda root_node: root_node['TYPE'] in ('LAYER', 'SERVICE'))
+
+    def __analyse_keywords(self, source_type, source_schema, source_object, keywords, dependencies):
+        for keyword in keywords:
+            if keyword['NAME'] in ('\\depends', '\\affects'):
+                source = {
+                    'TYPE': source_type.upper(),
+                    'SCHEMA': source_schema,
+                    'OBJECT': source_object,
+                }
+                target = {
+                    'TYPE': keyword['ARGS']['OBJECT_TYPE']['VALUE'],
+                    'SCHEMA': keyword['ARGS']['SCHEMA']['VALUE'],
+                    'OBJECT': keyword['ARGS']['OBJECT']['VALUE']
+                }
+                if 'TARGET_TYPE' in keyword:
+                    target['TYPE'] = keyword['TARGET_TYPE']
+                if 'FUNCTION_WITH_ARGS' in keyword:
+                    target['OBJECT'] = keyword['FUNCTION_WITH_ARGS']
+                if 'LAYER_NAME' in keyword:
+                    target['OBJECT'] = keyword['LAYER_NAME']
+                if 'SERVICE_NAME' in keyword:
+                    target['OBJECT'] = keyword['SERVICE_NAME']
+                for optional_field in ('ERROR', 'LAYER_URL', 'SERVICE_URL'):
+                    if optional_field in keyword:
+                        target[optional_field] = keyword[optional_field]
+
+                def make_id(object):
+                    object_type = object['TYPE'].lower()
+                    object_schema = '' if object['SCHEMA'] is None else object['SCHEMA'].lower()
+                    object_name = object['OBJECT'].lower()
+                    object['ID'] = '.'.join((object_type, object_schema, object_name))
+
+                make_id(source)
+                make_id(target)
+                if keyword['NAME'] == '\\affects':
+                    source, target = target, source
+                dependencies.append((source, target))
+
+    def __build_tree(self, dependencies, tree_root_node: dict, root_predictate):
+        for source, target in dependencies:
+            if root_predictate(source):
+                if source['ID'] not in tree_root_node:
+                    node = tree_root_node[source['ID']] = dict()
+                    node['ATTR'] = source
+                else:
+                    node = tree_root_node[source['ID']]
+                node_childs = node.setdefault('CHILDS', dict())
+                child_id = target['ID']
+                assert child_id not in node_childs
+                child_node = node_childs[child_id] = dict()
+                child_node['ATTR'] = target
+                self.__add_childs(dependencies, child_node)
+
+    def __add_childs(self, dependencies, parent_node):
+        for source, target in dependencies:
+            if source['ID'] == parent_node['ATTR']['ID']:
+                node_childs = parent_node.setdefault('CHILDS', dict())
+                child_id = target['ID']
+                assert child_id not in node_childs
+                child_node = node_childs[child_id] = dict()
+                child_node['ATTR'] = target
+                self.__add_childs(dependencies, child_node)
+
+
 def info_postprocess(db, layers_url, services_url):
     print('postprocessing data')
-
     comments_parser = CommentsParser(db, layers_url, services_url)
     comments_parser.parse()
+    dependendencies_investigator = DependendenciesInvestigator(db)
+    dependendencies_investigator.investigate()
 
 
 ######
@@ -800,7 +886,7 @@ def sgml_safe_id(string):
     # to prevent duplicating a non-array equivelent
     string = re.sub('\\[\\]', 'ARRAY-', string)
 
-    # Brackets, spaces, commads, underscores are not valid 'id' characters
+    # Brackets, spaces, commas, underscores are not valid 'id' characters
     # replace with as few -'s as possible.
     string = re.sub('[ "\',)(_-]+', '-', string)
 
@@ -1480,6 +1566,16 @@ def write_using_templates(db, database, template_path, output_filename_base, wan
     if not template_files:
         raise RuntimeError('Templates files not found in {}'.format(template_path))
 
+    def make_html_dependencies(dependencies, root=None):
+        if not dependencies:
+            return None
+        template_lookup = mako.lookup.TemplateLookup(directories=['templates'])
+        template = template_lookup.get_template('make_html_dependencies.mako')
+        return template.render(dependencies=dependencies)
+
+    dependencies = db[database]['DEPENDENCIES']
+    html_dependencies = make_html_dependencies(dependencies)
+
     # Process all found templates.
     for template_file in template_files:
         file_extension = os.path.splitext(os.path.split(template_file)[1])[0]
@@ -1501,6 +1597,7 @@ def write_using_templates(db, database, template_path, output_filename_base, wan
         tproc.set('dumped_on_dbk', docbook(dumped_on))
         tproc.set('fk_links', fk_links)
         tproc.set('schemas', schemas)
+        tproc.set('dependencies', html_dependencies)
 
         # Print the processed template.
         with open(output_filename, mode='w') as f:

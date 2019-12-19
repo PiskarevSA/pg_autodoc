@@ -21,6 +21,7 @@ def fetchall_as_list_of_dict(cur):
         result.append(row_as_dict)
     return result
 
+
 def quoted_and_comma_separated(elements):
     return ', '.join(map(lambda elem: "'" + elem + "'", elements))
 
@@ -178,25 +179,6 @@ def get_columns(cur, attrelid):
           AND attrelid = %(attrelid)s;
     '''
     cur.execute(request, {'attrelid': attrelid})
-    rows = fetchall_as_list_of_dict(cur)
-    return rows
-
-
-def get_indexes(cur, schemaname, tablename):
-    request = '''
-       SELECT schemaname
-            , tablename
-            , indexname
-            , substring(    indexdef
-                       FROM position('(' IN indexdef) + 1
-                        FOR length(indexdef) - position('(' IN indexdef) - 1
-                       ) AS indexdef
-         FROM pg_catalog.pg_indexes
-        WHERE substring(indexdef FROM 8 FOR 6) != 'UNIQUE'
-          AND schemaname = %(schemaname)s
-          AND tablename = %(tablename)s;
-    '''
-    cur.execute(request, {'schemaname': schemaname, 'tablename': tablename})
     rows = fetchall_as_list_of_dict(cur)
     return rows
 
