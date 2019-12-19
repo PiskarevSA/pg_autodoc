@@ -787,7 +787,7 @@ class CommentsParser:
             return None
 
 
-class DependendenciesInvestigator():
+class DependenciesInvestigator:
     def __init__(self, db):
         self.db = db
 
@@ -874,8 +874,8 @@ def info_postprocess(db, layers_url, services_url):
     print('postprocessing data')
     comments_parser = CommentsParser(db, layers_url, services_url)
     comments_parser.parse()
-    dependendencies_investigator = DependendenciesInvestigator(db)
-    dependendencies_investigator.investigate()
+    dependencies_investigator = DependenciesInvestigator(db)
+    dependencies_investigator.investigate()
 
 
 ######
