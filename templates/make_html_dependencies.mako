@@ -43,7 +43,8 @@ def tree_to_table(nodes, table, row=0, col=0):
         while col >= len(table[row]):
             table[row].append(None)
         # set value
-        table[row][col] = get_text(nodes[node_id]['ATTR'])
+        cell_attr = table[row][col] = dict()
+        cell_attr['TEXT'] = get_text(nodes[node_id]['ATTR'])
         # calc row span
         if 'CHILDS' in nodes[node_id]:
             node_row_span, node_max_col = tree_to_table(nodes[node_id]['CHILDS'], table, row, col+1)
@@ -52,19 +53,10 @@ def tree_to_table(nodes, table, row=0, col=0):
         else:
             node_row_span = 1
         row += node_row_span
+        cell_attr['ROW_SPAN'] = node_row_span
         total_row_span += node_row_span
     return total_row_span, max_col
 %>\
-<%def name="render_tree(nodes, level=0)">\
-${'    ' * level}<ul>
-% for node_id in sorted(nodes.keys()):
-    ${'    ' * level}<li>${get_text(nodes[node_id]['ATTR'])}</li>
-    % if 'CHILDS' in nodes[node_id]:
-${render_tree(nodes[node_id]['CHILDS'], level+1)}\
-    % endif
-% endfor
-${'    ' * level}</ul>
-</%def>\
 <%def name="render_table(nodes)">\
 <%
     table = list()
@@ -81,11 +73,12 @@ ${'    ' * level}</ul>
     <tbody>
 % for index, row in enumerate(table):
         <tr class=tr${index % 2}>
-            ${' '.join(['<td>' + (col if col is not None else '') + '</td>' for col in row])}
+            ${' '.join(['<td' + (' rowspan="{}"'.format(col['ROW_SPAN']) if col['ROW_SPAN'] != 1 else '') + '>' +
+            col['TEXT'] + '</td>' for col in row if col is not None])}\
+            ${' <td class=inactive{} colspan="{}"/>'.format(index % 2, cols_count - len(row)) if cols_count > len(row) else ''}
         </tr>
 % endfor
     </tbody>
 </table>
 </%def>\
-${render_tree(dependencies)}
 ${render_table(dependencies)}
