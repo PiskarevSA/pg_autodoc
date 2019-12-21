@@ -17,7 +17,7 @@ def sgml_safe_id(string):
 def get_text(node_attr):
     result = str()
     if 'ERROR' in node_attr:
-        result += '<b><font color="red">[ERROR: {}] </font></b>'.format(node_attr['ERROR'])
+        result += '<span class="error">[ERROR: {}] </span>'.format(node_attr['ERROR'])
     node_name = (node_attr['SCHEMA'] + '.' if node_attr['SCHEMA'] is not None else '') + node_attr['OBJECT']
     url = None
     if 'LAYER_URL' in node_attr:
@@ -28,7 +28,8 @@ def get_text(node_attr):
         url = '#' + sgml_safe_id('.'.join((node_attr['SCHEMA'], node_attr['TYPE'], node_attr['OBJECT'])))
     result += node_attr['TYPE'] + '<br>'
     if url is not None:
-        result += '<a href={}>{}</a>'.format(url, node_name)
+        before = result
+        result += '<a href="{}">{}</a>'.format(url, node_name)
     else:
         result += node_name
     return result
@@ -63,8 +64,7 @@ def tree_to_table(nodes, table, row=0, col=0):
     total_row_span, max_col = tree_to_table(nodes, table)
     cols_count = max_col + 1 if total_row_span else 0
 %>
-<table>
-    <caption><b>Зависимости слоёв и сервисов</b></caption>
+<table style="width:100%; border-spacing: 1px;">
     <thead>
         <tr>
             <th>Внешний объект</th>${' <th>Зависимости</th>' * (cols_count-1) if cols_count else ''}
@@ -72,10 +72,10 @@ def tree_to_table(nodes, table, row=0, col=0):
     </thead>
     <tbody>
 % for index, row in enumerate(table):
-        <tr class=tr${index % 2}>
+        <tr class="tr${index % 2}">
             ${' '.join(['<td' + (' rowspan="{}"'.format(col['ROW_SPAN']) if col['ROW_SPAN'] != 1 else '') + '>' +
             col['TEXT'] + '</td>' for col in row if col is not None])}\
-            ${' <td class=inactive{} colspan="{}"/>'.format(index % 2, cols_count - len(row)) if cols_count > len(row) else ''}
+            ${' <td class=inactive{} colspan="{}"></td>'.format(index % 2, cols_count - len(row)) if cols_count > len(row) else ''}
         </tr>
 % endfor
     </tbody>

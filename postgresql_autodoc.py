@@ -1,6 +1,6 @@
 # command line arguments to run in sandbox:
-#   -d sandbox -u postgres --password 1 --statistics -t html
-#   --host 192.168.12.208 -p 5432 -d radar_db -u postgres --statistics --password=123 -f output/radar_db
+#   -d sandbox -u postgres --password 1 --statistics -f output/sandbox -t html
+#   --host 192.168.12.208 -p 5432 -d radar_db -u postgres --statistics --password=123 -f output/radar_db -t html
 #
 # profiling:
 #   - interpreter options to enable profiling: -B -m cProfile -o output.prof
@@ -17,6 +17,7 @@ import re
 import sys
 import mako.template
 import mako.lookup
+import time
 
 import collect_info
 
@@ -1080,7 +1081,7 @@ def make_comment_html(comment, is_function_comment: bool, keywords: list):
             comment_pos = keyword_pos
         # .. insert error if exists
         if 'ERROR' in keyword:
-            result += '<b><font color="red">[ERROR: {}] </font></b>'.format(keyword['ERROR'])
+            result += '<span class="error">[ERROR: {}] </span>'.format(keyword['ERROR'])
             result += comment[keyword_pos:keyword_with_args_end]
             comment_pos = keyword_with_args_end
             continue
@@ -1127,9 +1128,9 @@ def make_comment_html(comment, is_function_comment: bool, keywords: list):
                 raise RuntimeError('unexpected object type: {}'.format(object_type))
             if add_inner_reference:
                 inner_reference = sgml_safe_id('.'.join((schema_name, object_type.lower(), object_name)))
-                html_target = '{} <a href=#{}>{}</a>'.format(prefix, inner_reference, full_object_name)
+                html_target = '{} <a href="#{}">{}</a>'.format(prefix, inner_reference, full_object_name)
             elif outer_reference:
-                html_target = '{} <a href={}>{}</a>'.format(prefix, outer_reference, full_object_name)
+                html_target = '{} <a href="{}">{}</a>'.format(prefix, outer_reference, full_object_name)
             else:
                 html_target = prefix + ' ' + full_object_name
             result += html_target
@@ -1249,7 +1250,7 @@ def write_using_templates(db, database, template_path, output_filename_base, wan
                         fkschema = con_attr['FKSCHEMA']
                         colconstraints.append({
                             'column_fk': 'FOREIGN KEY',
-                            'column_fk_colnum': fkcol,
+                            'column_fk_column': fkcol,
                             'column_fk_keygroup': fkgroup,
                             'column_fk_schema': fkschema,
                             'column_fk_schema_dbk': docbook(fkschema),
@@ -1557,19 +1558,25 @@ def write_using_templates(db, database, template_path, output_filename_base, wan
     # Output the results of the template as <filename>.<extension>
     # into the current working directory.
     template_files = list()
+    mako_templates = list()
     for dir, _, files in os.walk(template_path):
         for file in files:
             if os.path.splitext(file)[1] == '.tmpl':
                 template_files.append(os.path.join(dir, file))
+            elif os.path.splitext(file)[1] == '.mako' and os.path.splitext(file)[0] != 'make_html_dependencies':
+                mako_templates.append(file)
 
     # Ensure we've told the user if we don't find any files.
     if not template_files:
         raise RuntimeError('Templates files not found in {}'.format(template_path))
+    if not mako_templates:
+        raise RuntimeError('Templates files not found in {}'.format(template_path))
+
+    template_lookup = mako.lookup.TemplateLookup(directories=[template_path], input_encoding='utf-8')
 
     def make_html_dependencies(dependencies, root=None):
         if not dependencies:
             return None
-        template_lookup = mako.lookup.TemplateLookup(directories=['templates'], input_encoding='utf-8')
         template = template_lookup.get_template('make_html_dependencies.mako')
         return template.render(dependencies=dependencies)
 
@@ -1577,6 +1584,34 @@ def write_using_templates(db, database, template_path, output_filename_base, wan
     html_dependencies = make_html_dependencies(dependencies)
 
     # Process all found templates.
+    start = time.time()
+    for template_file in mako_templates:
+        file_extension = os.path.splitext(os.path.split(template_file)[1])[0]
+        if wanted_output and file_extension != wanted_output:
+            continue
+        output_filename = output_filename_base + '.mako.' + file_extension
+        print('Producing {} from {}'.format(output_filename, template_file))
+
+        template = template_lookup.get_template(template_file)
+        filled_template = template.render(database=database,
+                                          database_dbk=docbook(database),
+                                          database_sgmlid=sgml_safe_id(database),
+                                          database_comment=database_comment,
+                                          database_comment_dbk=docbook(database_comment),
+                                          database_comment_html=html(database_comment),
+                                          dumped_on=dumped_on,
+                                          dumped_on_dbk=docbook(dumped_on),
+                                          fk_links=fk_links,
+                                          schemas=schemas,
+                                          dependencies=html_dependencies)
+
+        # Print the processed template.
+        with open(output_filename, mode='w') as f:
+            f.write(filled_template)
+    finish = time.time()
+    print('templates done in {:.3f} sec'.format(finish - start))
+
+    start = time.time()
     for template_file in template_files:
         file_extension = os.path.splitext(os.path.split(template_file)[1])[0]
         if wanted_output and file_extension != wanted_output:
@@ -1602,6 +1637,8 @@ def write_using_templates(db, database, template_path, output_filename_base, wan
         # Print the processed template.
         with open(output_filename, mode='w') as f:
             f.write(tproc.process(template))
+    finish = time.time()
+    print('templates done in {:.3f} sec'.format(finish - start))
 
 
 if __name__ == '__main__':
