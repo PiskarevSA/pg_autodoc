@@ -179,7 +179,7 @@ def main():
     parser.add_argument('-c', '--config', metavar='<json>', type=str,
                         help='Config file (default: input/<database>.json). Contains: '
                              '1) whitelist and blacklist regular expressions for schemas; '
-                             '2)  whitelist and blacklist regular expressions '
+                             '2) whitelist and blacklist regular expressions '
                              'for tables and functions of concrete schema if required')
     parser.add_argument('-w', action="store_true",
                         help='Use ~/.pgpass for authentication (overrides all other password options)')
@@ -308,10 +308,6 @@ def main():
 # Pull out all of the applicable information about a specific database
 def info_collect(conn, db, database, schemas_whitelist_regex, schemas_blacklist_regex, schema_tweaks, statistics):
     print('collecting data')
-    if schemas_whitelist_regex is None:
-        schemas_whitelist_regex = '^'
-    if schemas_blacklist_regex is None:
-        schemas_blacklist_regex = '^'
     if schema_tweaks is None:
         schema_tweaks = dict()
 
