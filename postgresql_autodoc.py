@@ -920,7 +920,7 @@ def html(string):
     elif isinstance(string, int):
         return str(string)
     elif isinstance(string, str):
-        string = re.sub('&(?!(amp|lt|gr|apos|quot);)', '&amp', string)
+        string = re.sub('&(?!(amp|lt|gt|apos|quot);)', '&amp;', string)
         string = re.sub('<', '&lt;', string)
         string = re.sub('>', '&gt;', string)
         string = re.sub("'", '&apos;', string)
@@ -944,7 +944,7 @@ def docbook(string):
         if re.match('^@DOCBOOK', string):
             string = re.sub('^@DOCBOOK', '', string)
         else:
-            string = re.sub('&(?!(amp|lt|gr|apos|quot);)', '&amp', string)
+            string = re.sub('&(?!(amp|lt|gt|apos|quot);)', '&amp;', string)
             string = re.sub('<', '&lt;', string)
             string = re.sub('>', '&gt;', string)
             string = re.sub("'", '&apos;', string)
@@ -1616,7 +1616,7 @@ def write_using_templates(db, database, template_path, output_filename_base, wan
         print('Producing {} from {}'.format(output_filename, template_file))
 
         template = TemplateManager(debug=0).prepare(template_file)
-        tproc = TemplateProcessor(debug=0)
+        tproc = TemplateProcessor(html_escape=0, debug=0)
 
         tproc.set('database', database)
         tproc.set('database_dbk', docbook(database))

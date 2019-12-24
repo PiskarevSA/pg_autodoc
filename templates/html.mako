@@ -380,13 +380,13 @@ ${function['schema'] | h}</a>.\
 </h2>
 <h3>Returns: ${function['function_returns'] | h}</h3>
 <h3>Language: ${function['function_language'] | h}</h3>
-% if function['function_comment_html'] is not None:
+% if function['function_comment_html']:
 <p>${function['function_comment_html']}</p>
 % endif
 <details>
 <summary>Исходный код функции</summary>
 <pre>\
-% if function['function_source'] is not None:
+% if function['function_source']:
 ${function['function_source'] | h}\
 % endif
 </pre>
