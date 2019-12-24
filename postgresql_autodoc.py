@@ -9,7 +9,6 @@
 
 import argparse
 from datetime import datetime
-from htmltmpl import TemplateManager, TemplateProcessor
 import json
 import os
 import psycopg2
@@ -17,7 +16,6 @@ import re
 import sys
 import mako.template
 import mako.lookup
-import time
 
 import collect_info
 
@@ -1553,18 +1551,13 @@ def write_using_templates(db, database, template_path, output_filename_base, wan
     # Loop through each template found in the supplied path.
     # Output the results of the template as <filename>.<extension>
     # into the current working directory.
-    template_files = list()
     mako_templates = list()
     for dir, _, files in os.walk(template_path):
         for file in files:
-            if os.path.splitext(file)[1] == '.tmpl':
-                template_files.append(os.path.join(dir, file))
-            elif os.path.splitext(file)[1] == '.mako' and os.path.splitext(file)[0] != 'make_html_dependencies':
+            if os.path.splitext(file)[1] == '.mako' and os.path.splitext(file)[0] != 'make_html_dependencies':
                 mako_templates.append(file)
 
     # Ensure we've told the user if we don't find any files.
-    if not template_files:
-        raise RuntimeError('Templates files not found in {}'.format(template_path))
     if not mako_templates:
         raise RuntimeError('Templates files not found in {}'.format(template_path))
 
@@ -1580,7 +1573,6 @@ def write_using_templates(db, database, template_path, output_filename_base, wan
     html_dependencies = make_html_dependencies(dependencies)
 
     # Process all found templates.
-    start = time.time()
     for template_file in mako_templates:
         file_extension = os.path.splitext(os.path.split(template_file)[1])[0]
         if wanted_output and file_extension != wanted_output:
@@ -1604,37 +1596,6 @@ def write_using_templates(db, database, template_path, output_filename_base, wan
         # Print the processed template.
         with open(output_filename, mode='w') as f:
             f.write(filled_template)
-    finish = time.time()
-    print('templates done in {:.3f} sec'.format(finish - start))
-
-    start = time.time()
-    for template_file in template_files:
-        file_extension = os.path.splitext(os.path.split(template_file)[1])[0]
-        if wanted_output and file_extension != wanted_output:
-            continue
-        output_filename = output_filename_base + '.' + file_extension
-        print('Producing {} from {}'.format(output_filename, template_file))
-
-        template = TemplateManager(debug=0).prepare(template_file)
-        tproc = TemplateProcessor(html_escape=0, debug=0)
-
-        tproc.set('database', database)
-        tproc.set('database_dbk', docbook(database))
-        tproc.set('database_sgmlid', sgml_safe_id(database))
-        tproc.set('database_comment', database_comment)
-        tproc.set('database_comment_dbk', docbook(database_comment))
-        tproc.set('database_comment_html', html(database_comment))
-        tproc.set('dumped_on', dumped_on)
-        tproc.set('dumped_on_dbk', docbook(dumped_on))
-        tproc.set('fk_links', fk_links)
-        tproc.set('schemas', schemas)
-        tproc.set('dependencies', html_dependencies)
-
-        # Print the processed template.
-        with open(output_filename, mode='w') as f:
-            f.write(tproc.process(template))
-    finish = time.time()
-    print('templates done in {:.3f} sec'.format(finish - start))
 
 
 if __name__ == '__main__':
