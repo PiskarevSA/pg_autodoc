@@ -1577,7 +1577,7 @@ def write_using_templates(db, database, template_path, output_filename_base, wan
         file_extension = os.path.splitext(os.path.split(template_file)[1])[0]
         if wanted_output and file_extension != wanted_output:
             continue
-        output_filename = output_filename_base + '.mako.' + file_extension
+        output_filename = output_filename_base + '.' + file_extension
         print('Producing {} from {}'.format(output_filename, template_file))
 
         template = template_lookup.get_template(template_file)
