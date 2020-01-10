@@ -1592,9 +1592,10 @@ def write_using_templates(db, database, template_path, output_filename_base, wan
                                           fk_links=fk_links,
                                           schemas=schemas,
                                           dependencies=html_dependencies)
+        filled_template = filled_template.replace(os.linesep, '\n')
 
         # Print the processed template.
-        with open(output_filename, mode='w') as f:
+        with open(output_filename, mode='w', newline='\n', encoding='utf-8') as f:
             f.write(filled_template)
 
 
