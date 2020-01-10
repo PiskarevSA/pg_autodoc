@@ -54,7 +54,7 @@ Options
             The HTML is human readable (via web browser), representing the entire schema within a single HTML document,
             and includes referenceable labels for each object.
         - dia
-            This remaps the schema into XML using the XML schema of [[https://git.gnome.org/browse/dia/][Dia]],
+            This remaps the schema into XML using the XML schema of Dia_,
             an interactive diagramming tool.  It does not do any automated layout, so making the diagram usable would
             require manual work, so this is often not terribly useful.
         - xml
@@ -78,6 +78,8 @@ Options
         help='With the contrib module **pgstattuple** installed we can gather statistics on the tables
         in the database (average size, free space, disk space used, dead tuple counts, etc.) This is disk intensive
         on large databases as all pages must be visited
+
+.. _Dia: https://git.gnome.org/browse/dia/
 
 Authors
 =======
