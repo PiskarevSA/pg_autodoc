@@ -88,7 +88,7 @@ Authors
  - python3 version  (uses Mako)
     - Semen Piskarev <piskarevsa@mail.ru>
 
-.. _original Perl version: github.com/cbbrowne/autodoc
+.. _original Perl version: https://github.com/cbbrowne/autodoc
 
 License
 =======
